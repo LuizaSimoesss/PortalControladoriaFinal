@@ -125,12 +125,21 @@ export type UnidadeIndicador = "valor" | "percentual";
 
 export interface LancamentoIndicador {
   id: string;
+  importacaoId?: string;
   tipo: "realizado" | "orcado";
   data: string;          // "YYYY-MM-DD"
   periodo: string;       // "YYYY-MM" derivado de data
   cod_indicador: string;
   unidade: UnidadeIndicador;
   valor: number;
+}
+
+export interface ImportacaoIndicador {
+  id: string;
+  tipo: "realizado" | "orcado";
+  periodo: string;     // "YYYY-MM"
+  criadoEm: string;   // ISO datetime
+  totalLinhas: number;
 }
 
 export const naturezaDataInicial: NaturezaRow[] = [];
