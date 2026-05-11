@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import {
   Plus, Trash2, Pencil, Search, Upload, X, AlertTriangle,
   ChevronLeft, ChevronRight, CheckCircle2, Clock, FileText, Star,
-  Filter, ChevronDown,
+  Filter, ChevronDown, Download,
 } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { usePersistedData, loadData, saveData } from "@/lib/storage";
@@ -429,6 +429,59 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
     }
   }
 
+  function baixarTemplate() {
+    const wb = XLSX.utils.book_new();
+
+    // Aba 1: Template (linha de exemplo zerada)
+    const cols = isRealizado
+      ? ["AD_DTDECOMPETENCIA","CODNAT","CODCENCUS","CODEMP","VALOR_FINAL","CODPROJ","CODPARC","NUFIN","HISTORICO"]
+      : ["PERIODO","CODNAT","CODCENCUS","VALOR","CODEMP","CODPROJ","CODPARC","NUFIN"];
+    const wsT = XLSX.utils.aoa_to_sheet([cols, cols.map((c, i) => {
+      if (c.includes("PERIODO") || c.includes("DATA") || c.includes("COMPETENCIA")) return "01/2026";
+      if (c === "VALOR_FINAL" || c === "VALOR") return "1000,00";
+      if (c === "CODNAT")    return natRows.find(r => r.ANALITICA && r.ATIVA)?.CODNAT    ?? "";
+      if (c === "CODCENCUS") return crRows.find(r  => r.ANALITICO && r.ATIVO)?.CODCENCUS ?? "";
+      if (c === "CODEMP")    return empRows[0]?.CODEMP ?? "";
+      return "";
+    })]);
+    XLSX.utils.book_append_sheet(wb, wsT, "Template");
+
+    // Aba 2: Naturezas
+    const nat = natRows.filter(r => r.ANALITICA && r.ATIVA);
+    if (nat.length > 0) {
+      const ws = XLSX.utils.json_to_sheet(nat.map(r => ({ CODNAT: r.CODNAT, Descrição: r.DESCRNAT })));
+      XLSX.utils.book_append_sheet(wb, ws, "Naturezas");
+    }
+
+    // Aba 3: Centros_Resultado
+    const cr = crRows.filter(r => r.ANALITICO && r.ATIVO);
+    if (cr.length > 0) {
+      const ws = XLSX.utils.json_to_sheet(cr.map(r => ({ CODCENCUS: r.CODCENCUS, Descrição: r.DESCRCENCUS })));
+      XLSX.utils.book_append_sheet(wb, ws, "Centros_Resultado");
+    }
+
+    // Aba 4: Empresas
+    if (empRows.length > 0) {
+      const ws = XLSX.utils.json_to_sheet(empRows.map(r => ({ CODEMP: r.CODEMP, RazaoSocial: r.RAZAOSOCIAL })));
+      XLSX.utils.book_append_sheet(wb, ws, "Empresas");
+    }
+
+    // Aba 5: Projetos
+    const proj = projRows.filter(r => r.ANALITICO && r.ATIVO);
+    if (proj.length > 0) {
+      const ws = XLSX.utils.json_to_sheet(proj.map(r => ({ CODPROJ: r.CODPROJ, Identificação: r.IDENTIFICACAO })));
+      XLSX.utils.book_append_sheet(wb, ws, "Projetos");
+    }
+
+    // Aba 6: Parceiros
+    if (parcRows.length > 0) {
+      const ws = XLSX.utils.json_to_sheet(parcRows.map(r => ({ CODPARC: r.CODPARC, Nome: r.NOMEPARC })));
+      XLSX.utils.book_append_sheet(wb, ws, "Parceiros");
+    }
+
+    XLSX.writeFile(wb, `Template_Lancamentos_Financeiro_${tipo}.xlsx`);
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={loading ? undefined : onClose} />
@@ -538,11 +591,15 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
               </div>
 
               {/* Upload */}
-              <div>
+              <div className="flex items-center gap-2 flex-wrap">
                 <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.txt" className="hidden" onChange={handleFile} />
                 <button onClick={() => fileRef.current?.click()}
                   className="flex items-center gap-2 px-4 py-2 text-sm font-medium border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
                   <Upload size={14} /> Selecionar arquivo
+                </button>
+                <button onClick={baixarTemplate}
+                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium border border-blue-200 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 transition-colors">
+                  <Download size={14} /> Baixar Template
                 </button>
               </div>
 
