@@ -373,19 +373,19 @@ export default function GestaoFundosConsultoriaPage() {
                 <thead>
                   <tr style={{ background: "#1e3a5f" }}>
                     {/* Col 1 — Parceiro */}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[210px]"
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[300px]"
                       style={{ background: "#1e3a5f" }}>
                       Parceiro
                     </th>
                     {/* Col 2 — Identificação */}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[190px] border-l border-white/10"
-                      style={{ background: "#1e3a5f", left: "210px" }}>
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[280px] border-l border-white/10"
+                      style={{ background: "#1e3a5f", left: "300px" }}>
                       Identificação
                     </th>
                     {/* Col 3 — Área (only Consultoria) */}
                     {isConsultoria && (
-                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[220px] border-l border-white/10"
-                        style={{ background: "#1e3a5f", left: "400px" }}>
+                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[240px] border-l border-white/10"
+                        style={{ background: "#1e3a5f", left: "580px" }}>
                         Área
                       </th>
                     )}
@@ -425,7 +425,7 @@ export default function GestaoFundosConsultoriaPage() {
                           {parc
                             ? <div className="flex flex-col">
                                 <span className="font-mono text-xs text-blue-700 font-semibold">{parc}</span>
-                                <span className="text-xs text-gray-600 truncate max-w-[175px]" title={parcNome ?? ""}>{parcNome}</span>
+                                <span className="text-xs text-gray-600 max-w-[268px]" title={parcNome ?? ""}>{parcNome}</span>
                               </div>
                             : <span className="text-xs text-gray-400 italic">Sem parceiro</span>
                           }
@@ -433,11 +433,11 @@ export default function GestaoFundosConsultoriaPage() {
 
                         {/* Identificação */}
                         <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
-                          style={{ background: rowBg, left: "210px" }}>
+                          style={{ background: rowBg, left: "300px" }}>
                           {proj
                             ? <div className="flex flex-col">
                                 <span className="font-mono text-xs text-gray-500 font-semibold">{proj}</span>
-                                <span className="text-xs text-gray-700 truncate max-w-[155px]" title={projIdent ?? ""}>{projIdent}</span>
+                                <span className="text-xs text-gray-700 max-w-[248px]" title={projIdent ?? ""}>{projIdent}</span>
                               </div>
                             : <span className="text-xs text-gray-300">—</span>
                           }
@@ -446,7 +446,7 @@ export default function GestaoFundosConsultoriaPage() {
                         {/* Área (Consultoria only) */}
                         {isConsultoria && (
                           <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
-                            style={{ background: rowBg, left: "400px" }}>
+                            style={{ background: rowBg, left: "580px" }}>
                             {area
                               ? <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap"
                                   style={areaColor ? { background: areaColor.bg, color: areaColor.color } : { background: "#f1f5f9", color: "#64748b" }}>
@@ -492,10 +492,10 @@ export default function GestaoFundosConsultoriaPage() {
                         Total
                       </td>
                       <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100"
-                        style={{ background: "#f0f4f8", left: "210px" }} />
+                        style={{ background: "#f0f4f8", left: "300px" }} />
                       {isConsultoria && (
                         <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100"
-                          style={{ background: "#f0f4f8", left: "400px" }} />
+                          style={{ background: "#f0f4f8", left: "580px" }} />
                       )}
                       {periodos.map(p => {
                         const v = colTotals.get(p) ?? 0;
