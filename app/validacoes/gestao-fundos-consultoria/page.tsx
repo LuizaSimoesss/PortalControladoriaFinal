@@ -16,15 +16,28 @@ const ABA_LABEL: Record<Aba, string> = {
   consultoria: "Consultoria Especializada",
 };
 
-const ABA_DESCRNAT: Record<Aba, string> = {
-  gestao:      "gestão de fundos",
-  consultoria: "consultoria especializada",
+// ── Consultoria: código → área ────────────────────────────────────────────────
+const CONSULTORIA_MAP: Record<string, string> = {
+  "10.01.01.01": "Real Estate",
+  "10.01.01.02": "Private Equity & Venture Capital",
+  "10.01.01.03": "Private Equity & Venture Capital",
+  "10.01.01.04": "Crédito Privado",
+  "10.01.01.06": "Líquidos",
 };
+const CONSULTORIA_CODS = new Set(Object.keys(CONSULTORIA_MAP));
 
-// Row key = "CODPARC|CODPROJ" (either may be "")
-function rowKey(codparc: string | undefined, codproj: string | undefined) {
-  return `${codparc ?? ""}|${codproj ?? ""}`;
-}
+// Ordem de exibição das áreas
+const AREA_ORDER = [
+  "Real Estate",
+  "Private Equity & Venture Capital",
+  "Crédito Privado",
+  "Líquidos",
+];
+
+// ── Gestão de Fundos: match por DESCRNAT ──────────────────────────────────────
+const GESTAO_DESCRNAT = "gestão de fundos";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function periodoLabel(p: string) {
   if (!p) return "—";
@@ -45,6 +58,21 @@ function fmtBRL(v: number) {
   return v.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
+// Row key: "codparc|codproj|area" (area = "" para Gestão)
+function mkKey(codparc?: string, codproj?: string, area?: string) {
+  return `${codparc ?? ""}|${codproj ?? ""}|${area ?? ""}`;
+}
+
+// ── Área badge colors ─────────────────────────────────────────────────────────
+const AREA_COLORS: Record<string, { bg: string; color: string }> = {
+  "Real Estate":                        { bg: "#dbeafe", color: "#1e40af" },
+  "Private Equity & Venture Capital":   { bg: "#f3e8ff", color: "#6b21a8" },
+  "Crédito Privado":                    { bg: "#dcfce7", color: "#166534" },
+  "Líquidos":                           { bg: "#fef9c3", color: "#713f12" },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function GestaoFundosConsultoriaPage() {
   const [aba, setAba] = useState<Aba>("gestao");
   const [fechamentos] = usePersistedData<Fechamento[]>("portal_fechamentos", []);
@@ -57,17 +85,17 @@ export default function GestaoFundosConsultoriaPage() {
   const parcRows = useMemo(() => loadData<ParceiroRow[]>("portal_parceiro", []), []);
   const projRows = useMemo(() => loadData<ProjetoRow[]>("portal_projetos", []), []);
 
-  const natMap  = useMemo(() => new Map(natRows.map(r  => [r.CODNAT,  r])),                         [natRows]);
-  const parcMap = useMemo(() => new Map(parcRows.map(r => [r.CODPARC, r.NOMEPARC])),                [parcRows]);
-  const projMap = useMemo(() => new Map(projRows.map(r => [r.CODPROJ, r.IDENTIFICACAO])),           [projRows]);
+  const parcMap = useMemo(() => new Map(parcRows.map(r => [r.CODPARC, r.NOMEPARC])),      [parcRows]);
+  const projMap = useMemo(() => new Map(projRows.map(r => [r.CODPROJ, r.IDENTIFICACAO])), [projRows]);
 
-  const natCodsGestao = useMemo(() =>
-    new Set(natRows.filter(r => r.DESCRNAT.toLowerCase().includes(ABA_DESCRNAT.gestao)).map(r => r.CODNAT)),
+  // Natureza codes for Gestão de Fundos (by DESCRNAT)
+  const gestaoNatCods = useMemo(() =>
+    new Set(natRows.filter(r => r.DESCRNAT.toLowerCase().includes(GESTAO_DESCRNAT)).map(r => r.CODNAT)),
     [natRows]
   );
-  const natCodsConsultoria = useMemo(() =>
-    new Set(natRows.filter(r => r.DESCRNAT.toLowerCase().includes(ABA_DESCRNAT.consultoria)).map(r => r.CODNAT)),
-    [natRows]
+  const gestaoNatMatchadas = useMemo(() =>
+    natRows.filter(r => gestaoNatCods.has(r.CODNAT)),
+    [natRows, gestaoNatCods]
   );
 
   useEffect(() => {
@@ -93,11 +121,14 @@ export default function GestaoFundosConsultoriaPage() {
     [lancamentos, fechamentoId]
   );
 
-  const natCods = aba === "gestao" ? natCodsGestao : natCodsConsultoria;
-  const filtrados = useMemo(() =>
-    lancamentosBase.filter(l => natCods.has(l.codnat)),
-    [lancamentosBase, natCods]
-  );
+  // Filter lançamentos for the active tab
+  const filtrados = useMemo(() => {
+    if (aba === "gestao") {
+      return lancamentosBase.filter(l => gestaoNatCods.has(l.codnat));
+    }
+    // consultoria: filter by specific CODNAT codes
+    return lancamentosBase.filter(l => CONSULTORIA_CODS.has(l.codnat));
+  }, [aba, lancamentosBase, gestaoNatCods]);
 
   // Unique periods sorted
   const periodos = useMemo(() =>
@@ -105,32 +136,42 @@ export default function GestaoFundosConsultoriaPage() {
     [filtrados]
   );
 
-  // Unique row keys (parceiro + projeto), sorted by parceiro then projeto
+  // Build row keys
+  // Gestão:      parceiro + projeto
+  // Consultoria: parceiro + projeto + área
   const rowKeys = useMemo(() => {
     const set = new Set<string>();
-    filtrados.forEach(l => set.add(rowKey(l.codparc, l.codproj)));
+    filtrados.forEach(l => {
+      const area = aba === "consultoria" ? (CONSULTORIA_MAP[l.codnat] ?? "") : "";
+      set.add(mkKey(l.codparc, l.codproj, area));
+    });
+
     return [...set].sort((a, b) => {
-      const [pa, pja] = a.split("|");
-      const [pb, pjb] = b.split("|");
+      const [pa, pja, aa] = a.split("|");
+      const [pb, pjb, ab] = b.split("|");
       const cmpParc = (pa || "zzz").localeCompare(pb || "zzz", undefined, { numeric: true, sensitivity: "base" });
       if (cmpParc !== 0) return cmpParc;
-      return (pja || "zzz").localeCompare(pjb || "zzz", undefined, { numeric: true, sensitivity: "base" });
+      const cmpProj = (pja || "zzz").localeCompare(pjb || "zzz", undefined, { numeric: true, sensitivity: "base" });
+      if (cmpProj !== 0) return cmpProj;
+      // Sort area by AREA_ORDER
+      return AREA_ORDER.indexOf(aa) - AREA_ORDER.indexOf(ab);
     });
-  }, [filtrados]);
+  }, [filtrados, aba]);
 
   // Pivot: rowKey -> periodo -> total
   const pivot = useMemo(() => {
     const map = new Map<string, Map<string, number>>();
     for (const l of filtrados) {
-      const k = rowKey(l.codparc, l.codproj);
+      const area = aba === "consultoria" ? (CONSULTORIA_MAP[l.codnat] ?? "") : "";
+      const k = mkKey(l.codparc, l.codproj, area);
       if (!map.has(k)) map.set(k, new Map());
       const inner = map.get(k)!;
       inner.set(l.periodo, (inner.get(l.periodo) ?? 0) + l.valor);
     }
     return map;
-  }, [filtrados]);
+  }, [filtrados, aba]);
 
-  // Column totals
+  // Column totals (all rows, not just filtered)
   const colTotals = useMemo(() => {
     const tot = new Map<string, number>();
     periodos.forEach(p => {
@@ -156,25 +197,18 @@ export default function GestaoFundosConsultoriaPage() {
     [colTotals]
   );
 
-  const natCodsAtivos = aba === "gestao" ? natCodsGestao : natCodsConsultoria;
-  const natMatchadas = useMemo(() =>
-    natRows.filter(r => natCodsAtivos.has(r.CODNAT)),
-    [natRows, natCodsAtivos]
-  );
-
-  // Filter by busca (parceiro ou projeto)
+  // Filter by busca
   const rowKeysFiltered = useMemo(() => {
     if (!busca.trim()) return rowKeys;
     const q = busca.toLowerCase();
     return rowKeys.filter(k => {
-      const [parc, proj] = k.split("|");
-      const parcNome = parcMap.get(parc) ?? "";
-      const projIdent = projMap.get(proj) ?? "";
+      const [parc, proj, area] = k.split("|");
       return (
         parc.toLowerCase().includes(q) ||
-        parcNome.toLowerCase().includes(q) ||
+        (parcMap.get(parc) ?? "").toLowerCase().includes(q) ||
         proj.toLowerCase().includes(q) ||
-        projIdent.toLowerCase().includes(q)
+        (projMap.get(proj) ?? "").toLowerCase().includes(q) ||
+        area.toLowerCase().includes(q)
       );
     });
   }, [rowKeys, busca, parcMap, projMap]);
@@ -190,6 +224,9 @@ export default function GestaoFundosConsultoriaPage() {
       </div>
     );
   }
+
+  const hasData = filtrados.length > 0;
+  const isConsultoria = aba === "consultoria";
 
   return (
     <div>
@@ -227,7 +264,7 @@ export default function GestaoFundosConsultoriaPage() {
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
-              placeholder="Buscar parceiro ou projeto…"
+              placeholder={isConsultoria ? "Buscar parceiro, projeto ou área…" : "Buscar parceiro ou projeto…"}
               value={busca}
               onChange={e => setBusca(e.target.value)}
               className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -241,11 +278,11 @@ export default function GestaoFundosConsultoriaPage() {
           </span>
         </div>
 
-        {/* Naturezas identificadas */}
-        {natMatchadas.length > 0 && (
+        {/* Naturezas — Gestão de Fundos */}
+        {aba === "gestao" && gestaoNatMatchadas.length > 0 && (
           <div className="flex flex-wrap gap-1.5 items-center">
             <span className="text-xs text-gray-400">Naturezas:</span>
-            {natMatchadas.map(n => (
+            {gestaoNatMatchadas.map(n => (
               <span key={n.CODNAT}
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-100">
                 {n.CODNAT} <span className="font-sans font-normal text-blue-500">— {n.DESCRNAT}</span>
@@ -254,21 +291,40 @@ export default function GestaoFundosConsultoriaPage() {
           </div>
         )}
 
+        {/* Áreas — Consultoria Especializada */}
+        {isConsultoria && (
+          <div className="flex flex-wrap gap-1.5 items-center">
+            <span className="text-xs text-gray-400">Áreas:</span>
+            {AREA_ORDER.map(area => {
+              const color = AREA_COLORS[area] ?? { bg: "#f1f5f9", color: "#64748b" };
+              const cods = Object.entries(CONSULTORIA_MAP).filter(([, v]) => v === area).map(([k]) => k);
+              return (
+                <span key={area}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border"
+                  style={{ background: color.bg, color: color.color, borderColor: color.bg }}>
+                  {area}
+                  <span className="font-mono font-normal opacity-70">{cods.join(", ")}</span>
+                </span>
+              );
+            })}
+          </div>
+        )}
+
         {/* Sem dados */}
-        {filtrados.length === 0 && (
+        {!hasData && (
           <div className="flex flex-col items-center justify-center py-20 bg-white rounded-xl border border-gray-100 text-center">
             <p className="text-gray-500 font-medium">Nenhum lançamento encontrado</p>
             <p className="text-gray-400 text-sm mt-1">
-              {natMatchadas.length === 0
-                ? <>Nenhuma natureza com <span className="font-semibold">"{ABA_LABEL[aba]}"</span> na descrição.</>
-                : "Nenhum lançamento para as naturezas identificadas no período selecionado."
+              {aba === "gestao" && gestaoNatMatchadas.length === 0
+                ? <>Nenhuma natureza com <span className="font-semibold">"Gestão de Fundos"</span> na descrição.</>
+                : "Nenhum lançamento para as naturezas configuradas no período selecionado."
               }
             </p>
           </div>
         )}
 
         {/* Tabela pivot */}
-        {filtrados.length > 0 && (
+        {hasData && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
               <span className="font-semibold text-gray-800 text-sm">{ABA_LABEL[aba]} — Realizado por Parceiro</span>
@@ -285,15 +341,22 @@ export default function GestaoFundosConsultoriaPage() {
                 <thead>
                   <tr style={{ background: "#1e3a5f" }}>
                     {/* Col 1 — Parceiro */}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[220px]"
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[210px]"
                       style={{ background: "#1e3a5f" }}>
                       Parceiro
                     </th>
-                    {/* Col 2 — Identificação (Projeto) */}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[200px] border-l border-white/10"
-                      style={{ background: "#1e3a5f", left: "220px" }}>
+                    {/* Col 2 — Identificação */}
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[190px] border-l border-white/10"
+                      style={{ background: "#1e3a5f", left: "210px" }}>
                       Identificação
                     </th>
+                    {/* Col 3 — Área (only Consultoria) */}
+                    {isConsultoria && (
+                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[220px] border-l border-white/10"
+                        style={{ background: "#1e3a5f", left: "400px" }}>
+                        Área
+                      </th>
+                    )}
                     {/* Month columns */}
                     {periodos.map(p => (
                       <th key={p}
@@ -311,41 +374,56 @@ export default function GestaoFundosConsultoriaPage() {
 
                 <tbody>
                   {rowKeysFiltered.map((k, i) => {
-                    const [parc, proj] = k.split("|");
-                    const inner   = pivot.get(k);
-                    const rowTot  = rowTotals.get(k) ?? 0;
+                    const [parc, proj, area] = k.split("|");
+                    const inner    = pivot.get(k);
+                    const rowTot   = rowTotals.get(k) ?? 0;
                     const parcNome = parc ? (parcMap.get(parc) ?? parc) : null;
                     const projIdent = proj ? (projMap.get(proj) ?? proj) : null;
-                    const rowBg   = i % 2 === 0 ? "white" : "#f9fafb";
+                    const rowBg    = i % 2 === 0 ? "white" : "#f9fafb";
+                    const areaColor = AREA_COLORS[area];
 
                     return (
                       <tr key={k}
                         className="border-b border-gray-50 hover:bg-blue-50/40 transition-colors"
                         style={{ background: rowBg }}>
 
-                        {/* Parceiro — sticky col 1 */}
+                        {/* Parceiro */}
                         <td className="px-4 py-2 sticky left-0 z-10 border-r border-gray-100"
                           style={{ background: rowBg }}>
                           {parc
                             ? <div className="flex flex-col">
                                 <span className="font-mono text-xs text-blue-700 font-semibold">{parc}</span>
-                                <span className="text-xs text-gray-600 truncate max-w-[180px]" title={parcNome ?? ""}>{parcNome}</span>
+                                <span className="text-xs text-gray-600 truncate max-w-[175px]" title={parcNome ?? ""}>{parcNome}</span>
                               </div>
                             : <span className="text-xs text-gray-400 italic">Sem parceiro</span>
                           }
                         </td>
 
-                        {/* Identificação (Projeto) — sticky col 2 */}
+                        {/* Identificação */}
                         <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
-                          style={{ background: rowBg, left: "220px" }}>
+                          style={{ background: rowBg, left: "210px" }}>
                           {proj
                             ? <div className="flex flex-col">
                                 <span className="font-mono text-xs text-gray-500 font-semibold">{proj}</span>
-                                <span className="text-xs text-gray-700 truncate max-w-[160px]" title={projIdent ?? ""}>{projIdent}</span>
+                                <span className="text-xs text-gray-700 truncate max-w-[155px]" title={projIdent ?? ""}>{projIdent}</span>
                               </div>
                             : <span className="text-xs text-gray-300">—</span>
                           }
                         </td>
+
+                        {/* Área (Consultoria only) */}
+                        {isConsultoria && (
+                          <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
+                            style={{ background: rowBg, left: "400px" }}>
+                            {area
+                              ? <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap"
+                                  style={areaColor ? { background: areaColor.bg, color: areaColor.color } : { background: "#f1f5f9", color: "#64748b" }}>
+                                  {area}
+                                </span>
+                              : <span className="text-xs text-gray-300">—</span>
+                            }
+                          </td>
+                        )}
 
                         {/* Valores por mês */}
                         {periodos.map(p => {
@@ -367,7 +445,7 @@ export default function GestaoFundosConsultoriaPage() {
 
                   {rowKeysFiltered.length === 0 && (
                     <tr>
-                      <td colSpan={periodos.length + 3} className="px-4 py-10 text-center text-gray-400 text-sm">
+                      <td colSpan={periodos.length + (isConsultoria ? 4 : 3)} className="px-4 py-10 text-center text-gray-400 text-sm">
                         Nenhum resultado para "{busca}".
                       </td>
                     </tr>
@@ -381,8 +459,12 @@ export default function GestaoFundosConsultoriaPage() {
                         style={{ background: "#f0f4f8" }}>
                         Total
                       </td>
-                      <td className="px-4 py-2.5 sticky z-10 border-t border-gray-200 border-r border-gray-100"
-                        style={{ background: "#f0f4f8", left: "220px" }} />
+                      <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100"
+                        style={{ background: "#f0f4f8", left: "210px" }} />
+                      {isConsultoria && (
+                        <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100"
+                          style={{ background: "#f0f4f8", left: "400px" }} />
+                      )}
                       {periodos.map(p => {
                         const v = colTotals.get(p) ?? 0;
                         return (
