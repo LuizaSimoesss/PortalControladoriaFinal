@@ -197,6 +197,14 @@ export default function GestaoFundosConsultoriaPage() {
     [colTotals]
   );
 
+  // Unique CODNATs in base lançamentos (for diagnostics when empty)
+  const uniqueNatCodsBase = useMemo(() => {
+    if (aba !== "consultoria" || filtrados.length > 0) return [];
+    const s = new Set<string>();
+    lancamentosBase.forEach(l => { if (l.codnat) s.add(l.codnat); });
+    return [...s].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  }, [aba, filtrados.length, lancamentosBase]);
+
   // Filter by busca
   const rowKeysFiltered = useMemo(() => {
     if (!busca.trim()) return rowKeys;
@@ -312,14 +320,38 @@ export default function GestaoFundosConsultoriaPage() {
 
         {/* Sem dados */}
         {!hasData && (
-          <div className="flex flex-col items-center justify-center py-20 bg-white rounded-xl border border-gray-100 text-center">
-            <p className="text-gray-500 font-medium">Nenhum lançamento encontrado</p>
-            <p className="text-gray-400 text-sm mt-1">
-              {aba === "gestao" && gestaoNatMatchadas.length === 0
-                ? <>Nenhuma natureza com <span className="font-semibold">"Gestão de Fundos"</span> na descrição.</>
-                : "Nenhum lançamento para as naturezas configuradas no período selecionado."
-              }
-            </p>
+          <div className="bg-white rounded-xl border border-gray-100 p-6 space-y-4">
+            <p className="text-gray-500 font-medium text-sm text-center">Nenhum lançamento encontrado para os códigos configurados.</p>
+
+            {isConsultoria && uniqueNatCodsBase.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">
+                  CODNATs encontrados nos lançamentos (selecione o fechamento correto para ver):
+                </p>
+                <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
+                  {uniqueNatCodsBase.map(cod => {
+                    const isConfigured = CONSULTORIA_CODS.has(cod);
+                    return (
+                      <span key={cod}
+                        className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-semibold border"
+                        style={isConfigured
+                          ? { background: "#dcfce7", color: "#166534", borderColor: "#86efac" }
+                          : { background: "#f8fafc", color: "#64748b", borderColor: "#e2e8f0" }}>
+                        {cod}
+                        {isConfigured && <span className="ml-1 text-[9px]">✓</span>}
+                      </span>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-gray-400">
+                  Os códigos em verde já estão configurados. Os cinzas não estão mapeados. Verifique se os códigos acima correspondem aos informados.
+                </p>
+              </div>
+            )}
+
+            {isConsultoria && uniqueNatCodsBase.length === 0 && (
+              <p className="text-xs text-gray-400 text-center">Nenhum lançamento realizado encontrado no fechamento selecionado.</p>
+            )}
           </div>
         )}
 
