@@ -80,6 +80,8 @@ export default function GestaoFundosConsultoriaPage() {
   const [dataLoaded, setDataLoaded] = useState(false);
   const [fechamentoId, setFechamentoId] = useState("__todos__");
   const [busca, setBusca] = useState("");
+  const [dataInicio, setDataInicio] = useState("");
+  const [dataFim, setDataFim] = useState("");
 
   const natRows  = useMemo(() => loadData<NaturezaRow[]>("portal_natureza", []), []);
   const parcRows = useMemo(() => loadData<ParceiroRow[]>("portal_parceiro", []), []);
@@ -116,9 +118,11 @@ export default function GestaoFundosConsultoriaPage() {
     lancamentos.filter(l => {
       if (l.tipo !== "realizado") return false;
       if (fechamentoId !== "__todos__" && l.fechamentoId !== fechamentoId) return false;
+      if (dataInicio && l.data < dataInicio) return false;
+      if (dataFim   && l.data > dataFim)   return false;
       return true;
     }),
-    [lancamentos, fechamentoId]
+    [lancamentos, fechamentoId, dataInicio, dataFim]
   );
 
   // Filter lançamentos for the active tab
@@ -236,12 +240,14 @@ export default function GestaoFundosConsultoriaPage() {
   const hasData = filtrados.length > 0;
   const isConsultoria = aba === "consultoria";
 
+  const temFiltroData = !!(dataInicio || dataFim);
+
   return (
-    <div>
+    <div className="flex flex-col h-full">
       <PageHeader title="Receitas" subtitle="Validação · Realizado por Parceiro" />
 
       {/* Abas */}
-      <div className="flex gap-0 border-b border-slate-200 bg-white px-6">
+      <div className="flex gap-0 border-b border-slate-200 bg-white px-6 flex-shrink-0">
         {(["gestao", "consultoria"] as Aba[]).map(a => (
           <button key={a}
             className={`flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition-colors ${
@@ -253,268 +259,280 @@ export default function GestaoFundosConsultoriaPage() {
         ))}
       </div>
 
-      <div className="p-6 space-y-5">
+      {/* Layout: filtro fixo à esquerda + conteúdo */}
+      <div className="flex flex-1 min-h-0">
 
-        {/* Controles */}
-        <div className="flex items-center gap-3 flex-wrap">
-          <select
-            value={fechamentoId}
-            onChange={e => setFechamentoId(e.target.value)}
-            className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-600 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="__todos__">Todos os fechamentos</option>
-            {fechamentosRealizado.map(f => (
-              <option key={f.id} value={f.id}>{f.ativo ? `★ ${f.label}` : f.label}</option>
-            ))}
-          </select>
-
-          <div className="relative max-w-xs flex-1 min-w-[200px]">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder={isConsultoria ? "Buscar parceiro, projeto ou área…" : "Buscar parceiro ou projeto…"}
-              value={busca}
-              onChange={e => setBusca(e.target.value)}
-              className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-
-          <span className="ml-auto text-xs text-gray-400">
-            {rowKeysFiltered.length} linha{rowKeysFiltered.length !== 1 ? "s" : ""}
-            {" · "}
-            {periodos.length} período{periodos.length !== 1 ? "s" : ""}
-          </span>
-        </div>
-
-        {/* Naturezas — Gestão de Fundos */}
-        {aba === "gestao" && gestaoNatMatchadas.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 items-center">
-            <span className="text-xs text-gray-400">Naturezas:</span>
-            {gestaoNatMatchadas.map(n => (
-              <span key={n.CODNAT}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-100">
-                {n.CODNAT} <span className="font-sans font-normal text-blue-500">— {n.DESCRNAT}</span>
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Áreas — Consultoria Especializada */}
-        {isConsultoria && (
-          <div className="flex flex-wrap gap-1.5 items-center">
-            <span className="text-xs text-gray-400">Áreas:</span>
-            {AREA_ORDER.map(area => {
-              const color = AREA_COLORS[area] ?? { bg: "#f1f5f9", color: "#64748b" };
-              const cods = Object.entries(CONSULTORIA_MAP).filter(([, v]) => v === area).map(([k]) => k);
-              return (
-                <span key={area}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border"
-                  style={{ background: color.bg, color: color.color, borderColor: color.bg }}>
-                  {area}
-                  <span className="font-mono font-normal opacity-70">{cods.join(", ")}</span>
-                </span>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Sem dados */}
-        {!hasData && (
-          <div className="bg-white rounded-xl border border-gray-100 p-6 space-y-4">
-            <p className="text-gray-500 font-medium text-sm text-center">Nenhum lançamento encontrado para os códigos configurados.</p>
-
-            {isConsultoria && uniqueNatCodsBase.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">
-                  CODNATs encontrados nos lançamentos (selecione o fechamento correto para ver):
-                </p>
-                <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
-                  {uniqueNatCodsBase.map(cod => {
-                    const isConfigured = CONSULTORIA_CODS.has(cod);
-                    return (
-                      <span key={cod}
-                        className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-semibold border"
-                        style={isConfigured
-                          ? { background: "#dcfce7", color: "#166534", borderColor: "#86efac" }
-                          : { background: "#f8fafc", color: "#64748b", borderColor: "#e2e8f0" }}>
-                        {cod}
-                        {isConfigured && <span className="ml-1 text-[9px]">✓</span>}
-                      </span>
-                    );
-                  })}
-                </div>
-                <p className="text-xs text-gray-400">
-                  Os códigos em verde já estão configurados. Os cinzas não estão mapeados. Verifique se os códigos acima correspondem aos informados.
-                </p>
-              </div>
-            )}
-
-            {isConsultoria && uniqueNatCodsBase.length === 0 && (
-              <p className="text-xs text-gray-400 text-center">Nenhum lançamento realizado encontrado no fechamento selecionado.</p>
+        {/* ── Painel de filtros fixo ──────────────────────────────────────── */}
+        <aside className="w-[240px] flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-y-auto">
+          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+            <span className="text-sm font-semibold text-gray-700">Filtros</span>
+            {temFiltroData && (
+              <button onClick={() => { setDataInicio(""); setDataFim(""); }}
+                className="text-[11px] text-blue-600 hover:underline">
+                limpar
+              </button>
             )}
           </div>
-        )}
 
-        {/* Tabela pivot */}
-        {hasData && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-              <span className="font-semibold text-gray-800 text-sm">{ABA_LABEL[aba]} — Realizado por Parceiro</span>
-              <span className="text-xs text-gray-400">
-                Total geral:{" "}
-                <span className={`font-semibold tabular-nums ${grandTotal < 0 ? "text-red-600" : "text-gray-700"}`}>
-                  {fmtBRL(grandTotal)}
+          {/* Fechamento */}
+          <div className="border-b border-gray-100 px-4 py-3">
+            <p className="text-xs font-semibold text-gray-600 mb-2">Fechamento</p>
+            <select
+              value={fechamentoId}
+              onChange={e => setFechamentoId(e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs text-gray-600 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="__todos__">Todos</option>
+              {fechamentosRealizado.map(f => (
+                <option key={f.id} value={f.id}>{f.ativo ? `★ ${f.label}` : f.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Data */}
+          <div className="border-b border-gray-100 px-4 py-3 space-y-2">
+            <p className="text-xs font-semibold text-gray-600 flex items-center justify-between">
+              Data
+              {temFiltroData && (
+                <span onClick={() => { setDataInicio(""); setDataFim(""); }}
+                  className="text-[11px] text-blue-600 hover:underline cursor-pointer font-normal">
+                  limpar
                 </span>
-              </span>
+              )}
+            </p>
+            <div>
+              <label className="text-[11px] text-gray-400 mb-1 block">De</label>
+              <input type="date" value={dataInicio}
+                onChange={e => setDataInicio(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white" />
             </div>
+            <div>
+              <label className="text-[11px] text-gray-400 mb-1 block">Até</label>
+              <input type="date" value={dataFim}
+                onChange={e => setDataFim(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white" />
+            </div>
+          </div>
+        </aside>
 
-            <div className="overflow-x-auto overflow-y-auto max-h-[65vh]">
-              <table className="text-sm border-collapse min-w-max w-full">
-                <thead>
-                  <tr style={{ background: "#1e3a5f" }}>
-                    {/* Col 1 — Parceiro */}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[300px]"
-                      style={{ background: "#1e3a5f" }}>
-                      Parceiro
-                    </th>
-                    {/* Col 2 — Identificação */}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[280px] border-l border-white/10"
-                      style={{ background: "#1e3a5f", left: "300px" }}>
-                      Identificação
-                    </th>
-                    {/* Col 3 — Área (only Consultoria) */}
-                    {isConsultoria && (
-                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[240px] border-l border-white/10"
-                        style={{ background: "#1e3a5f", left: "580px" }}>
-                        Área
+        {/* ── Conteúdo principal ──────────────────────────────────────────── */}
+        <div className="flex-1 p-6 space-y-5 overflow-auto">
+
+          {/* Controles */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="relative max-w-xs flex-1 min-w-[200px]">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                placeholder={isConsultoria ? "Buscar parceiro, projeto ou área…" : "Buscar parceiro ou projeto…"}
+                value={busca}
+                onChange={e => setBusca(e.target.value)}
+                className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <span className="ml-auto text-xs text-gray-400">
+              {rowKeysFiltered.length} linha{rowKeysFiltered.length !== 1 ? "s" : ""}
+              {" · "}
+              {periodos.length} período{periodos.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+
+          {/* Naturezas — Gestão de Fundos */}
+          {aba === "gestao" && gestaoNatMatchadas.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-xs text-gray-400">Naturezas:</span>
+              {gestaoNatMatchadas.map(n => (
+                <span key={n.CODNAT}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-100">
+                  {n.CODNAT} <span className="font-sans font-normal text-blue-500">— {n.DESCRNAT}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Áreas — Consultoria Especializada */}
+          {isConsultoria && (
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-xs text-gray-400">Áreas:</span>
+              {AREA_ORDER.map(area => {
+                const color = AREA_COLORS[area] ?? { bg: "#f1f5f9", color: "#64748b" };
+                const cods = Object.entries(CONSULTORIA_MAP).filter(([, v]) => v === area).map(([k]) => k);
+                return (
+                  <span key={area}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border"
+                    style={{ background: color.bg, color: color.color, borderColor: color.bg }}>
+                    {area}
+                    <span className="font-mono font-normal opacity-70">{cods.join(", ")}</span>
+                  </span>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Sem dados */}
+          {!hasData && (
+            <div className="bg-white rounded-xl border border-gray-100 p-6 space-y-4">
+              <p className="text-gray-500 font-medium text-sm text-center">Nenhum lançamento encontrado para os códigos configurados.</p>
+              {isConsultoria && uniqueNatCodsBase.length > 0 && (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-500 font-semibold uppercase tracking-wide">
+                    CODNATs encontrados nos lançamentos:
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
+                    {uniqueNatCodsBase.map(cod => {
+                      const isConfigured = CONSULTORIA_CODS.has(cod);
+                      return (
+                        <span key={cod}
+                          className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-semibold border"
+                          style={isConfigured
+                            ? { background: "#dcfce7", color: "#166534", borderColor: "#86efac" }
+                            : { background: "#f8fafc", color: "#64748b", borderColor: "#e2e8f0" }}>
+                          {cod}{isConfigured && <span className="ml-1 text-[9px]">✓</span>}
+                        </span>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-gray-400">Verde = configurado · Cinza = não mapeado</p>
+                </div>
+              )}
+              {isConsultoria && uniqueNatCodsBase.length === 0 && (
+                <p className="text-xs text-gray-400 text-center">Nenhum lançamento realizado encontrado no período/fechamento selecionado.</p>
+              )}
+            </div>
+          )}
+
+          {/* Tabela pivot */}
+          {hasData && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+                <span className="font-semibold text-gray-800 text-sm">{ABA_LABEL[aba]} — Realizado por Parceiro</span>
+                <span className="text-xs text-gray-400">
+                  Total geral:{" "}
+                  <span className={`font-semibold tabular-nums ${grandTotal < 0 ? "text-red-600" : "text-gray-700"}`}>
+                    {fmtBRL(grandTotal)}
+                  </span>
+                </span>
+              </div>
+
+              <div className="overflow-x-auto overflow-y-auto max-h-[65vh]">
+                <table className="text-sm border-collapse min-w-max w-full">
+                  <thead>
+                    <tr style={{ background: "#1e3a5f" }}>
+                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[300px]"
+                        style={{ background: "#1e3a5f" }}>
+                        Parceiro
                       </th>
-                    )}
-                    {/* Month columns */}
-                    {periodos.map(p => (
-                      <th key={p}
-                        className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap"
-                        style={{ minWidth: "90px" }}>
-                        {periodoLabel(p)}
+                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[280px] border-l border-white/10"
+                        style={{ background: "#1e3a5f", left: "300px" }}>
+                        Identificação
                       </th>
-                    ))}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-right whitespace-nowrap border-l border-white/20"
-                      style={{ minWidth: "110px" }}>
-                      Total
-                    </th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {rowKeysFiltered.map((k, i) => {
-                    const [parc, proj, area] = k.split("|");
-                    const inner    = pivot.get(k);
-                    const rowTot   = rowTotals.get(k) ?? 0;
-                    const parcNome = parc ? (parcMap.get(parc) ?? parc) : null;
-                    const projIdent = proj ? (projMap.get(proj) ?? proj) : null;
-                    const rowBg    = i % 2 === 0 ? "white" : "#f9fafb";
-                    const areaColor = AREA_COLORS[area];
-
-                    return (
-                      <tr key={k}
-                        className="border-b border-gray-50 hover:bg-blue-50/40 transition-colors"
-                        style={{ background: rowBg }}>
-
-                        {/* Parceiro */}
-                        <td className="px-4 py-2 sticky left-0 z-10 border-r border-gray-100"
-                          style={{ background: rowBg }}>
-                          {parc
-                            ? <div className="flex flex-col">
-                                <span className="font-mono text-xs text-blue-700 font-semibold">{parc}</span>
-                                <span className="text-xs text-gray-600 max-w-[268px]" title={parcNome ?? ""}>{parcNome}</span>
-                              </div>
-                            : <span className="text-xs text-gray-400 italic">Sem parceiro</span>
-                          }
-                        </td>
-
-                        {/* Identificação */}
-                        <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
-                          style={{ background: rowBg, left: "300px" }}>
-                          {proj
-                            ? <div className="flex flex-col">
-                                <span className="font-mono text-xs text-gray-500 font-semibold">{proj}</span>
-                                <span className="text-xs text-gray-700 max-w-[248px]" title={projIdent ?? ""}>{projIdent}</span>
-                              </div>
-                            : <span className="text-xs text-gray-300">—</span>
-                          }
-                        </td>
-
-                        {/* Área (Consultoria only) */}
-                        {isConsultoria && (
-                          <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
-                            style={{ background: rowBg, left: "580px" }}>
-                            {area
-                              ? <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap"
-                                  style={areaColor ? { background: areaColor.bg, color: areaColor.color } : { background: "#f1f5f9", color: "#64748b" }}>
-                                  {area}
-                                </span>
+                      {isConsultoria && (
+                        <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[240px] border-l border-white/10"
+                          style={{ background: "#1e3a5f", left: "580px" }}>
+                          Área
+                        </th>
+                      )}
+                      {periodos.map(p => (
+                        <th key={p}
+                          className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap"
+                          style={{ minWidth: "90px" }}>
+                          {periodoLabel(p)}
+                        </th>
+                      ))}
+                      <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-right whitespace-nowrap border-l border-white/20"
+                        style={{ minWidth: "110px" }}>
+                        Total
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowKeysFiltered.map((k, i) => {
+                      const [parc, proj, area] = k.split("|");
+                      const inner     = pivot.get(k);
+                      const rowTot    = rowTotals.get(k) ?? 0;
+                      const parcNome  = parc ? (parcMap.get(parc) ?? parc) : null;
+                      const projIdent = proj ? (projMap.get(proj) ?? proj) : null;
+                      const rowBg     = i % 2 === 0 ? "white" : "#f9fafb";
+                      const areaColor = AREA_COLORS[area];
+                      return (
+                        <tr key={k} className="border-b border-gray-50 hover:bg-blue-50/40 transition-colors" style={{ background: rowBg }}>
+                          <td className="px-4 py-2 sticky left-0 z-10 border-r border-gray-100" style={{ background: rowBg }}>
+                            {parc
+                              ? <div className="flex flex-col">
+                                  <span className="font-mono text-xs text-blue-700 font-semibold">{parc}</span>
+                                  <span className="text-xs text-gray-600 max-w-[268px]" title={parcNome ?? ""}>{parcNome}</span>
+                                </div>
+                              : <span className="text-xs text-gray-400 italic">Sem parceiro</span>
+                            }
+                          </td>
+                          <td className="px-4 py-2 sticky z-10 border-r border-gray-100" style={{ background: rowBg, left: "300px" }}>
+                            {proj
+                              ? <div className="flex flex-col">
+                                  <span className="font-mono text-xs text-gray-500 font-semibold">{proj}</span>
+                                  <span className="text-xs text-gray-700 max-w-[248px]" title={projIdent ?? ""}>{projIdent}</span>
+                                </div>
                               : <span className="text-xs text-gray-300">—</span>
                             }
                           </td>
-                        )}
-
-                        {/* Valores por mês */}
-                        {periodos.map(p => {
-                          const v = inner?.get(p) ?? 0;
-                          return (
+                          {isConsultoria && (
+                            <td className="px-4 py-2 sticky z-10 border-r border-gray-100" style={{ background: rowBg, left: "580px" }}>
+                              {area
+                                ? <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold whitespace-nowrap"
+                                    style={areaColor ? { background: areaColor.bg, color: areaColor.color } : { background: "#f1f5f9", color: "#64748b" }}>
+                                    {area}
+                                  </span>
+                                : <span className="text-xs text-gray-300">—</span>
+                              }
+                            </td>
+                          )}
+                          {periodos.map(p => (
                             <td key={p} className="px-3 py-2 text-right tabular-nums text-xs whitespace-nowrap">
-                              {fmtBRLCell(v)}
+                              {fmtBRLCell(inner?.get(p) ?? 0)}
+                            </td>
+                          ))}
+                          <td className={`px-4 py-2 text-right tabular-nums text-xs font-semibold whitespace-nowrap border-l border-gray-100 ${rowTot < 0 ? "text-red-600" : "text-gray-800"}`}>
+                            {fmtBRL(rowTot)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {rowKeysFiltered.length === 0 && (
+                      <tr>
+                        <td colSpan={periodos.length + (isConsultoria ? 4 : 3)} className="px-4 py-10 text-center text-gray-400 text-sm">
+                          Nenhum resultado para "{busca}".
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                  {rowKeysFiltered.length > 0 && (
+                    <tfoot>
+                      <tr style={{ background: "#f0f4f8" }}>
+                        <td className="px-4 py-2.5 text-xs font-bold text-gray-700 uppercase tracking-wide sticky left-0 z-10 border-t border-gray-200 border-r border-gray-100" style={{ background: "#f0f4f8" }}>
+                          Total
+                        </td>
+                        <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100" style={{ background: "#f0f4f8", left: "300px" }} />
+                        {isConsultoria && (
+                          <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100" style={{ background: "#f0f4f8", left: "580px" }} />
+                        )}
+                        {periodos.map(p => {
+                          const v = colTotals.get(p) ?? 0;
+                          return (
+                            <td key={p} className={`px-3 py-2.5 text-right tabular-nums text-xs font-bold border-t border-gray-200 whitespace-nowrap ${v < 0 ? "text-red-600" : "text-gray-800"}`}>
+                              {fmtBRL(v)}
                             </td>
                           );
                         })}
-
-                        {/* Total da linha */}
-                        <td className={`px-4 py-2 text-right tabular-nums text-xs font-semibold whitespace-nowrap border-l border-gray-100 ${rowTot < 0 ? "text-red-600" : "text-gray-800"}`}>
-                          {fmtBRL(rowTot)}
+                        <td className={`px-4 py-2.5 text-right tabular-nums text-xs font-bold border-t border-gray-200 border-l border-gray-100 whitespace-nowrap ${grandTotal < 0 ? "text-red-600" : "text-gray-800"}`}>
+                          {fmtBRL(grandTotal)}
                         </td>
                       </tr>
-                    );
-                  })}
-
-                  {rowKeysFiltered.length === 0 && (
-                    <tr>
-                      <td colSpan={periodos.length + (isConsultoria ? 4 : 3)} className="px-4 py-10 text-center text-gray-400 text-sm">
-                        Nenhum resultado para "{busca}".
-                      </td>
-                    </tr>
+                    </tfoot>
                   )}
-                </tbody>
-
-                {rowKeysFiltered.length > 0 && (
-                  <tfoot>
-                    <tr style={{ background: "#f0f4f8" }}>
-                      <td className="px-4 py-2.5 text-xs font-bold text-gray-700 uppercase tracking-wide sticky left-0 z-10 border-t border-gray-200 border-r border-gray-100"
-                        style={{ background: "#f0f4f8" }}>
-                        Total
-                      </td>
-                      <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100"
-                        style={{ background: "#f0f4f8", left: "300px" }} />
-                      {isConsultoria && (
-                        <td className="sticky z-10 border-t border-gray-200 border-r border-gray-100"
-                          style={{ background: "#f0f4f8", left: "580px" }} />
-                      )}
-                      {periodos.map(p => {
-                        const v = colTotals.get(p) ?? 0;
-                        return (
-                          <td key={p} className={`px-3 py-2.5 text-right tabular-nums text-xs font-bold border-t border-gray-200 whitespace-nowrap ${v < 0 ? "text-red-600" : "text-gray-800"}`}>
-                            {fmtBRL(v)}
-                          </td>
-                        );
-                      })}
-                      <td className={`px-4 py-2.5 text-right tabular-nums text-xs font-bold border-t border-gray-200 border-l border-gray-100 whitespace-nowrap ${grandTotal < 0 ? "text-red-600" : "text-gray-800"}`}>
-                        {fmtBRL(grandTotal)}
-                      </td>
-                    </tr>
-                  </tfoot>
-                )}
-              </table>
+                </table>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
