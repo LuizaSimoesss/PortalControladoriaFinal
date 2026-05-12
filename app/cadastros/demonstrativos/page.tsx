@@ -125,7 +125,7 @@ function getRowStyle(tipo: string, nivel: number): { background: string; color: 
 
 // ─── AccountPicker ────────────────────────────────────────────────────────────
 
-interface AccountOption { cod: string; descr: string; grau: number; analitico: boolean; ativo: boolean; classificacao?: string; }
+interface AccountOption { cod: string; descr: string; grau: number; analitico: boolean; ativo: boolean; }
 
 function AccountPicker({ value, onChange, options, placeholder = "— Selecionar —" }: {
   value?: string; onChange: (cod: string) => void; options: AccountOption[]; placeholder?: string;
@@ -133,21 +133,13 @@ function AccountPicker({ value, onChange, options, placeholder = "— Selecionar
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [somenteAnaliticos, setSomenteAnaliticos] = useState(false);
-  const [classFiltro, setClassFiltro] = useState("");
-
-  const classificacoes = useMemo(() => {
-    const vals = new Set<string>();
-    options.forEach(o => { if (o.classificacao && o.classificacao !== "") vals.add(o.classificacao); });
-    return Array.from(vals).sort();
-  }, [options]);
 
   const filtered = useMemo(() => options.filter(o => {
     if (o.ativo === false) return false;
     if (somenteAnaliticos && !o.analitico) return false;
-    if (classFiltro && o.classificacao !== classFiltro) return false;
     if (search) { const q = search.toLowerCase(); return o.cod.toLowerCase().includes(q) || o.descr.toLowerCase().includes(q); }
     return true;
-  }), [options, search, somenteAnaliticos, classFiltro]);
+  }), [options, search, somenteAnaliticos]);
 
   const selected = value ? options.find(o => o.cod === value) : null;
 
@@ -175,24 +167,6 @@ function AccountPicker({ value, onChange, options, placeholder = "— Selecionar
               className="w-3.5 h-3.5 cursor-pointer" style={{ accentColor: "#1e3a5f" }} />
             <span className="text-xs text-gray-600 cursor-pointer select-none" onClick={() => setSomenteAnaliticos(v => !v)}>Apenas analíticos</span>
           </div>
-          {classificacoes.length > 0 && (
-            <div className="px-3 py-1.5 border-b border-gray-100 flex flex-wrap gap-1">
-              <button type="button"
-                onClick={() => setClassFiltro("")}
-                className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
-                style={classFiltro === "" ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
-                Todos
-              </button>
-              {classificacoes.map(c => (
-                <button key={c} type="button"
-                  onClick={() => setClassFiltro(prev => prev === c ? "" : c)}
-                  className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
-                  style={classFiltro === c ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
-                  {c}
-                </button>
-              ))}
-            </div>
-          )}
           <div className="max-h-44 overflow-y-auto">
             {filtered.length === 0 ? (
               <p className="px-3 py-4 text-xs text-gray-400 text-center">
@@ -570,11 +544,11 @@ export default function DemonstrativosPage() {
 
   const natOpts = useMemo<AccountOption[]>(() =>
     [...natData].sort((a, b) => a.CODNAT.localeCompare(b.CODNAT, undefined, { numeric: true, sensitivity: "base" }))
-      .map(r => ({ cod: r.CODNAT, descr: r.DESCRNAT, grau: r.GRAU, analitico: r.ANALITICA ?? false, ativo: r.ATIVA !== false, classificacao: r.CLASSIFICACAO || "" })), [natData]);
+      .map(r => ({ cod: r.CODNAT, descr: r.DESCRNAT, grau: r.GRAU, analitico: r.ANALITICA ?? false, ativo: r.ATIVA !== false })), [natData]);
 
   const crOpts = useMemo<AccountOption[]>(() =>
     [...crData].sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" }))
-      .map(r => ({ cod: r.CODCENCUS, descr: r.DESCRCENCUS, grau: r.GRAU, analitico: r.ANALITICO ?? false, ativo: r.ATIVO !== false, classificacao: r.CLASSIFICACAO || "" })), [crData]);
+      .map(r => ({ cod: r.CODCENCUS, descr: r.DESCRCENCUS, grau: r.GRAU, analitico: r.ANALITICO ?? false, ativo: r.ATIVO !== false })), [crData]);
 
   const codes = useMemo(() => computeCodes(data), [data]);
 
