@@ -18,11 +18,11 @@ const ABA_LABEL: Record<Aba, string> = {
 
 // ── Consultoria: código → área ────────────────────────────────────────────────
 const CONSULTORIA_MAP: Record<string, string> = {
-  "10.01.01.01": "Real Estate",
-  "10.01.01.02": "Private Equity & Venture Capital",
-  "10.01.01.03": "Private Equity & Venture Capital",
-  "10.01.01.04": "Crédito Privado",
-  "10.01.01.06": "Líquidos",
+  "10010101": "Real Estate",
+  "10010102": "Private Equity & Venture Capital",
+  "10010103": "Private Equity & Venture Capital",
+  "10010104": "Crédito Privado",
+  "10010106": "Líquidos",
 };
 const CONSULTORIA_CODS = new Set(Object.keys(CONSULTORIA_MAP));
 
