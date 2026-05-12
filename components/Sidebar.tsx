@@ -74,7 +74,7 @@ const menuItems: MenuItem[] = [
     icon: <ShieldAlert size={18} />,
     children: [
       { label: "Lançtos. sem Alocação", path: "/validacoes/lancamentos-sem-alocacao",         icon: <AlertTriangle size={15} /> },
-      { label: "Gestão de Fundos / Consultoria", path: "/validacoes/gestao-fundos-consultoria", icon: <Briefcase size={15} /> },
+      { label: "Receitas", path: "/validacoes/gestao-fundos-consultoria", icon: <Briefcase size={15} /> },
     ],
   },
   {

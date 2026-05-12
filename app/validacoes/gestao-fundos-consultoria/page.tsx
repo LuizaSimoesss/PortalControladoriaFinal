@@ -224,7 +224,7 @@ export default function GestaoFundosConsultoriaPage() {
   if (!dataLoaded) {
     return (
       <div>
-        <PageHeader title="Gestão de Fundos / Consultoria" subtitle="Validação · Realizado por Parceiro" />
+        <PageHeader title="Receitas" subtitle="Validação · Realizado por Parceiro" />
         <div className="flex items-center justify-center py-20 gap-3 text-gray-400">
           <div className="w-5 h-5 border-2 border-gray-200 border-t-blue-500 rounded-full animate-spin" />
           <span className="text-sm">Carregando lançamentos…</span>
@@ -238,7 +238,7 @@ export default function GestaoFundosConsultoriaPage() {
 
   return (
     <div>
-      <PageHeader title="Gestão de Fundos / Consultoria" subtitle="Validação · Realizado por Parceiro" />
+      <PageHeader title="Receitas" subtitle="Validação · Realizado por Parceiro" />
 
       {/* Abas */}
       <div className="flex gap-0 border-b border-slate-200 bg-white px-6">
