@@ -125,7 +125,7 @@ function getRowStyle(tipo: string, nivel: number): { background: string; color: 
 
 // ─── AccountPicker ────────────────────────────────────────────────────────────
 
-interface AccountOption { cod: string; descr: string; grau: number; analitico: boolean; ativo: boolean; }
+interface AccountOption { cod: string; descr: string; grau: number; analitico: boolean; ativo: boolean; classificacao?: string; }
 
 function AccountPicker({ value, onChange, options, placeholder = "— Selecionar —" }: {
   value?: string; onChange: (cod: string) => void; options: AccountOption[]; placeholder?: string;
@@ -201,6 +201,18 @@ function RegraSection({ titulo, regra, onChange, options }: {
   titulo: string; regra: RegraItem | undefined; onChange: (r: RegraItem | undefined) => void; options: AccountOption[];
 }) {
   const modo = regra?.modo ?? "none";
+  const [classFiltro, setClassFiltro] = useState("");
+
+  const classificacoes = useMemo(() => {
+    const vals = new Set<string>();
+    options.forEach(o => { if (o.classificacao) vals.add(o.classificacao); });
+    return Array.from(vals).sort();
+  }, [options]);
+
+  const filteredOptions = useMemo(() =>
+    classFiltro ? options.filter(o => o.classificacao === classFiltro) : options,
+    [options, classFiltro]);
+
   const intervaloInvalido = modo === "intervalo" && !!regra?.codDe && !!regra?.codAte &&
     regra.codDe.localeCompare(regra.codAte, undefined, { numeric: true, sensitivity: "base" }) > 0;
 
@@ -220,10 +232,31 @@ function RegraSection({ titulo, regra, onChange, options }: {
             </button>
           ))}
         </div>
+
+        {modo !== "none" && classificacoes.length > 0 && (
+          <div className="flex flex-wrap gap-1 items-center">
+            <span className="text-[10px] text-gray-400 mr-0.5">Classificação:</span>
+            <button type="button"
+              onClick={() => setClassFiltro("")}
+              className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
+              style={classFiltro === "" ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
+              Todos
+            </button>
+            {classificacoes.map(c => (
+              <button key={c} type="button"
+                onClick={() => setClassFiltro(prev => prev === c ? "" : c)}
+                className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
+                style={classFiltro === c ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
+
         {modo === "especifico" && (
           <AccountPicker value={regra?.codEspecifico}
             onChange={cod => onChange({ modo: "especifico", codEspecifico: cod || undefined })}
-            options={options} placeholder="— Selecionar conta —" />
+            options={filteredOptions} placeholder="— Selecionar conta —" />
         )}
         {modo === "intervalo" && (
           <div className="space-y-2">
@@ -231,13 +264,13 @@ function RegraSection({ titulo, regra, onChange, options }: {
               <label className="block text-xs text-gray-500 mb-1">De (início)</label>
               <AccountPicker value={regra?.codDe}
                 onChange={cod => onChange({ modo: "intervalo", codDe: cod || undefined, codAte: regra?.codAte })}
-                options={options} placeholder="— Início —" />
+                options={filteredOptions} placeholder="— Início —" />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">Até (fim)</label>
               <AccountPicker value={regra?.codAte}
                 onChange={cod => onChange({ modo: "intervalo", codDe: regra?.codDe, codAte: cod || undefined })}
-                options={options} placeholder="— Fim —" />
+                options={filteredOptions} placeholder="— Fim —" />
             </div>
             {intervaloInvalido && (
               <div className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
@@ -544,11 +577,11 @@ export default function DemonstrativosPage() {
 
   const natOpts = useMemo<AccountOption[]>(() =>
     [...natData].sort((a, b) => a.CODNAT.localeCompare(b.CODNAT, undefined, { numeric: true, sensitivity: "base" }))
-      .map(r => ({ cod: r.CODNAT, descr: r.DESCRNAT, grau: r.GRAU, analitico: r.ANALITICA ?? false, ativo: r.ATIVA !== false })), [natData]);
+      .map(r => ({ cod: r.CODNAT, descr: r.DESCRNAT, grau: r.GRAU, analitico: r.ANALITICA ?? false, ativo: r.ATIVA !== false, classificacao: r.CLASSIFICACAO || undefined })), [natData]);
 
   const crOpts = useMemo<AccountOption[]>(() =>
     [...crData].sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" }))
-      .map(r => ({ cod: r.CODCENCUS, descr: r.DESCRCENCUS, grau: r.GRAU, analitico: r.ANALITICO ?? false, ativo: r.ATIVO !== false })), [crData]);
+      .map(r => ({ cod: r.CODCENCUS, descr: r.DESCRCENCUS, grau: r.GRAU, analitico: r.ANALITICO ?? false, ativo: r.ATIVO !== false, classificacao: r.CLASSIFICACAO || undefined })), [crData]);
 
   const codes = useMemo(() => computeCodes(data), [data]);
 
