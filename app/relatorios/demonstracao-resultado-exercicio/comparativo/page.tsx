@@ -10,10 +10,10 @@ import type { LancamentoFinanceiro, Fechamento } from "@/lib/mockData";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ItemTipo  = "SUBTOTAL" | "CONTA";
-type RegraMode = "none" | "especifico" | "intervalo";
+type RegraMode = "none" | "especifico" | "intervalo" | "multiplo";
 type ViewMode  = "mensal" | "trimestral" | "quadrimestral" | "semestral";
 
-interface RegraItem   { modo: RegraMode; codEspecifico?: string; codDe?: string; codAte?: string }
+interface RegraItem   { modo: RegraMode; codEspecifico?: string; codDe?: string; codAte?: string; codMultiplos?: string[] }
 interface RegrasLinha { centroResultado?: RegraItem; natureza?: RegraItem }
 interface FormulaItem { subtotalId: string; sinal: "+" | "-" }
 
@@ -86,12 +86,14 @@ function computeCodes(items: DemoItem[]): string[] {
 function hasEffectiveRule(r: RegraItem | undefined): boolean {
   if (!r || r.modo === "none") return false;
   if (r.modo === "especifico") return !!r.codEspecifico;
+  if (r.modo === "multiplo") return (r.codMultiplos?.length ?? 0) > 0;
   return !!(r.codDe || r.codAte);
 }
 
 function matchesRegra(cod: string, r: RegraItem | undefined): boolean {
   if (!r || r.modo === "none") return true;
   if (r.modo === "especifico") return r.codEspecifico ? cod === r.codEspecifico : true;
+  if (r.modo === "multiplo") return r.codMultiplos ? r.codMultiplos.includes(cod) : true;
   const cmp = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
   if (r.codDe && cmp(cod, r.codDe) < 0) return false;
   if (r.codAte && cmp(cod, r.codAte) > 0) return false;

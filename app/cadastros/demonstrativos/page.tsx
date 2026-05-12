@@ -8,7 +8,7 @@ import type { NaturezaRow, CentroResultadoRow } from "@/lib/mockData";
 
 type ItemTipo = "SUBTOTAL" | "CONTA";
 type Demonstrativo = "DRE" | "DFC";
-type RegraMode = "none" | "especifico" | "intervalo";
+type RegraMode = "none" | "especifico" | "intervalo" | "multiplo";
 type DropMode = "before" | "inside" | "after";
 
 interface RegraItem {
@@ -16,6 +16,7 @@ interface RegraItem {
   codEspecifico?: string;
   codDe?: string;
   codAte?: string;
+  codMultiplos?: string[];
 }
 
 interface RegrasLinha {
@@ -213,6 +214,22 @@ function RegraSection({ titulo, regra, onChange, options }: {
     classFiltro ? options.filter(o => o.classificacao === classFiltro) : options,
     [options, classFiltro]);
 
+  const multiplos = regra?.codMultiplos ?? [];
+
+  function toggleCod(cod: string) {
+    const next = multiplos.includes(cod) ? multiplos.filter(c => c !== cod) : [...multiplos, cod];
+    onChange({ modo: "multiplo", codMultiplos: next });
+  }
+
+  function toggleClasse(classe: string) {
+    const codsClasse = options.filter(o => o.classificacao === classe).map(o => o.cod);
+    const todosPresentes = codsClasse.every(c => multiplos.includes(c));
+    const next = todosPresentes
+      ? multiplos.filter(c => !codsClasse.includes(c))
+      : [...new Set([...multiplos, ...codsClasse])];
+    onChange({ modo: "multiplo", codMultiplos: next });
+  }
+
   const intervaloInvalido = modo === "intervalo" && !!regra?.codDe && !!regra?.codAte &&
     regra.codDe.localeCompare(regra.codAte, undefined, { numeric: true, sensitivity: "base" }) > 0;
 
@@ -223,9 +240,11 @@ function RegraSection({ titulo, regra, onChange, options }: {
         <span className="text-xs font-semibold text-gray-700">{titulo}</span>
       </div>
       <div className="p-3 space-y-3">
-        <div className="flex gap-1">
-          {([["none", "Nenhum"], ["especifico", "Específico"], ["intervalo", "Intervalo"]] as [RegraMode, string][]).map(([v, l]) => (
-            <button key={v} type="button" onClick={() => onChange(v === "none" ? undefined : { modo: v })}
+        {/* Mode buttons */}
+        <div className="flex gap-1 flex-wrap">
+          {([["none", "Nenhum"], ["especifico", "Específico"], ["intervalo", "Intervalo"], ["multiplo", "Múltiplos"]] as [RegraMode, string][]).map(([v, l]) => (
+            <button key={v} type="button"
+              onClick={() => onChange(v === "none" ? undefined : { modo: v, codMultiplos: v === "multiplo" ? [] : undefined })}
               className="px-2.5 py-1 text-xs font-medium rounded-md border transition-all"
               style={modo === v ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
               {l}
@@ -233,31 +252,54 @@ function RegraSection({ titulo, regra, onChange, options }: {
           ))}
         </div>
 
+        {/* Classification filter — shown for all active modes */}
         {modo !== "none" && classificacoes.length > 0 && (
           <div className="flex flex-wrap gap-1 items-center">
             <span className="text-[10px] text-gray-400 mr-0.5">Classificação:</span>
             <button type="button"
-              onClick={() => setClassFiltro("")}
+              onClick={() => { setClassFiltro(""); }}
               className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
               style={classFiltro === "" ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
               Todos
             </button>
-            {classificacoes.map(c => (
-              <button key={c} type="button"
-                onClick={() => setClassFiltro(prev => prev === c ? "" : c)}
-                className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
-                style={classFiltro === c ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }}>
-                {c}
-              </button>
-            ))}
+            {classificacoes.map(c => {
+              const codsClasse = options.filter(o => o.classificacao === c).map(o => o.cod);
+              const allSelected = modo === "multiplo" && codsClasse.length > 0 && codsClasse.every(cod => multiplos.includes(cod));
+              const someSelected = !allSelected && modo === "multiplo" && codsClasse.some(cod => multiplos.includes(cod));
+              return (
+                <button key={c} type="button"
+                  onClick={() => {
+                    if (modo === "multiplo") {
+                      toggleClasse(c);
+                    } else {
+                      setClassFiltro(prev => prev === c ? "" : c);
+                    }
+                  }}
+                  className="px-2 py-0.5 text-[10px] font-medium rounded border transition-all"
+                  style={
+                    allSelected
+                      ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" }
+                      : someSelected
+                        ? { background: "#dbeafe", color: "#1e3a5f", borderColor: "#93c5fd" }
+                        : classFiltro === c
+                          ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" }
+                          : { background: "white", color: "#6b7280", borderColor: "#d1d5db" }
+                  }>
+                  {c}{allSelected ? " ✓" : someSelected ? " ·" : ""}
+                </button>
+              );
+            })}
           </div>
         )}
 
+        {/* Específico */}
         {modo === "especifico" && (
           <AccountPicker value={regra?.codEspecifico}
             onChange={cod => onChange({ modo: "especifico", codEspecifico: cod || undefined })}
             options={filteredOptions} placeholder="— Selecionar conta —" />
         )}
+
+        {/* Intervalo */}
         {modo === "intervalo" && (
           <div className="space-y-2">
             <div>
@@ -280,6 +322,44 @@ function RegraSection({ titulo, regra, onChange, options }: {
             )}
           </div>
         )}
+
+        {/* Múltiplos */}
+        {modo === "multiplo" && (
+          <div className="rounded-lg border border-gray-200 overflow-hidden bg-white">
+            <div className="px-3 py-1.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+              <span className="text-[10px] text-gray-500">
+                {multiplos.length > 0 ? `${multiplos.length} selecionado(s)` : "Nenhum selecionado"}
+              </span>
+              {multiplos.length > 0 && (
+                <button type="button" onClick={() => onChange({ modo: "multiplo", codMultiplos: [] })}
+                  className="text-[10px] text-red-500 hover:text-red-700 transition-colors">
+                  Limpar tudo
+                </button>
+              )}
+            </div>
+            <div className="max-h-48 overflow-y-auto divide-y divide-gray-50">
+              {filteredOptions.filter(o => o.ativo !== false).map(o => {
+                const checked = multiplos.includes(o.cod);
+                return (
+                  <label key={o.cod}
+                    className={`flex items-center gap-2.5 px-3 py-1.5 cursor-pointer transition-colors ${checked ? "bg-blue-50" : "hover:bg-gray-50"}`}
+                    style={{ paddingLeft: `${12 + (o.grau - 1) * 14}px` }}>
+                    <input type="checkbox" checked={checked} onChange={() => toggleCod(o.cod)}
+                      className="w-3.5 h-3.5 cursor-pointer flex-shrink-0" style={{ accentColor: "#1e3a5f" }} />
+                    <span className="font-mono text-xs text-blue-700 font-semibold flex-shrink-0 w-20">{o.cod}</span>
+                    <span className="text-xs text-gray-700 truncate flex-1">{o.descr}</span>
+                    {o.classificacao && (
+                      <span className="flex-shrink-0 text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">{o.classificacao}</span>
+                    )}
+                  </label>
+                );
+              })}
+              {filteredOptions.length === 0 && (
+                <p className="px-3 py-4 text-xs text-gray-400 text-center">Nenhum item encontrado.</p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -287,23 +367,30 @@ function RegraSection({ titulo, regra, onChange, options }: {
 
 // ─── Chips ────────────────────────────────────────────────────────────────────
 
+function regraChipLabel(prefix: string, r: RegraItem, color: string): { label: string; color: string }[] {
+  if (r.modo === "especifico" && r.codEspecifico)
+    return [{ label: `${prefix}: ${r.codEspecifico}`, color }];
+  if (r.modo === "intervalo" && (r.codDe || r.codAte))
+    return [{ label: `${prefix}: ${r.codDe ?? "?"} → ${r.codAte ?? "?"}`, color }];
+  if (r.modo === "multiplo" && r.codMultiplos && r.codMultiplos.length > 0) {
+    const MAX = 3;
+    const visible = r.codMultiplos.slice(0, MAX);
+    const extra = r.codMultiplos.length - MAX;
+    return [
+      ...visible.map(c => ({ label: `${prefix}: ${c}`, color })),
+      ...(extra > 0 ? [{ label: `+${extra}`, color }] : []),
+    ];
+  }
+  return [];
+}
+
 function RegraChips({ regras }: { regras?: RegrasLinha }) {
   if (!regras) return <span className="text-gray-300 text-xs">—</span>;
   const chips: { label: string; color: string }[] = [];
-  const cr = regras.centroResultado;
-  if (cr && cr.modo !== "none") {
-    if (cr.modo === "especifico" && cr.codEspecifico)
-      chips.push({ label: `CR: ${cr.codEspecifico}`, color: "bg-purple-100 text-purple-700" });
-    else if (cr.modo === "intervalo" && (cr.codDe || cr.codAte))
-      chips.push({ label: `CR: ${cr.codDe ?? "?"} → ${cr.codAte ?? "?"}`, color: "bg-purple-100 text-purple-700" });
-  }
-  const nat = regras.natureza;
-  if (nat && nat.modo !== "none") {
-    if (nat.modo === "especifico" && nat.codEspecifico)
-      chips.push({ label: `NAT: ${nat.codEspecifico}`, color: "bg-emerald-100 text-emerald-700" });
-    else if (nat.modo === "intervalo" && (nat.codDe || nat.codAte))
-      chips.push({ label: `NAT: ${nat.codDe ?? "?"} → ${nat.codAte ?? "?"}`, color: "bg-emerald-100 text-emerald-700" });
-  }
+  if (regras.centroResultado && regras.centroResultado.modo !== "none")
+    chips.push(...regraChipLabel("CR", regras.centroResultado, "bg-purple-100 text-purple-700"));
+  if (regras.natureza && regras.natureza.modo !== "none")
+    chips.push(...regraChipLabel("NAT", regras.natureza, "bg-emerald-100 text-emerald-700"));
   if (chips.length === 0) return <span className="text-gray-300 text-xs">—</span>;
   return (
     <div className="flex flex-wrap gap-1">
