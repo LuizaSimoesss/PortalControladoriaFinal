@@ -5,7 +5,7 @@ import { Search } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { loadData, usePersistedData } from "@/lib/storage";
 import { idbGet } from "@/lib/idb";
-import type { LancamentoFinanceiro, Fechamento, NaturezaRow, ParceiroRow } from "@/lib/mockData";
+import type { LancamentoFinanceiro, Fechamento, NaturezaRow, ParceiroRow, ProjetoRow } from "@/lib/mockData";
 
 type Aba = "gestao" | "consultoria";
 
@@ -16,11 +16,15 @@ const ABA_LABEL: Record<Aba, string> = {
   consultoria: "Consultoria Especializada",
 };
 
-// Substring to match in DESCRNAT (case-insensitive)
 const ABA_DESCRNAT: Record<Aba, string> = {
   gestao:      "gestão de fundos",
   consultoria: "consultoria especializada",
 };
+
+// Row key = "CODPARC|CODPROJ" (either may be "")
+function rowKey(codparc: string | undefined, codproj: string | undefined) {
+  return `${codparc ?? ""}|${codproj ?? ""}`;
+}
 
 function periodoLabel(p: string) {
   if (!p) return "—";
@@ -51,11 +55,12 @@ export default function GestaoFundosConsultoriaPage() {
 
   const natRows  = useMemo(() => loadData<NaturezaRow[]>("portal_natureza", []), []);
   const parcRows = useMemo(() => loadData<ParceiroRow[]>("portal_parceiro", []), []);
+  const projRows = useMemo(() => loadData<ProjetoRow[]>("portal_projetos", []), []);
 
-  const natMap  = useMemo(() => new Map(natRows.map(r => [r.CODNAT,  r])),           [natRows]);
-  const parcMap = useMemo(() => new Map(parcRows.map(r => [r.CODPARC, r.NOMEPARC])), [parcRows]);
+  const natMap  = useMemo(() => new Map(natRows.map(r  => [r.CODNAT,  r])),                         [natRows]);
+  const parcMap = useMemo(() => new Map(parcRows.map(r => [r.CODPARC, r.NOMEPARC])),                [parcRows]);
+  const projMap = useMemo(() => new Map(projRows.map(r => [r.CODPROJ, r.IDENTIFICACAO])),           [projRows]);
 
-  // Natureza codes that match each tab by DESCRNAT
   const natCodsGestao = useMemo(() =>
     new Set(natRows.filter(r => r.DESCRNAT.toLowerCase().includes(ABA_DESCRNAT.gestao)).map(r => r.CODNAT)),
     [natRows]
@@ -88,7 +93,6 @@ export default function GestaoFundosConsultoriaPage() {
     [lancamentos, fechamentoId]
   );
 
-  // Filter by natureza codes of the active tab
   const natCods = aba === "gestao" ? natCodsGestao : natCodsConsultoria;
   const filtrados = useMemo(() =>
     lancamentosBase.filter(l => natCods.has(l.codnat)),
@@ -101,24 +105,26 @@ export default function GestaoFundosConsultoriaPage() {
     [filtrados]
   );
 
-  // Unique parceiros (including "" for sem parceiro)
-  const parceiros = useMemo(() => {
+  // Unique row keys (parceiro + projeto), sorted by parceiro then projeto
+  const rowKeys = useMemo(() => {
     const set = new Set<string>();
-    filtrados.forEach(l => set.add(l.codparc ?? ""));
+    filtrados.forEach(l => set.add(rowKey(l.codparc, l.codproj)));
     return [...set].sort((a, b) => {
-      if (!a) return 1;
-      if (!b) return -1;
-      return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+      const [pa, pja] = a.split("|");
+      const [pb, pjb] = b.split("|");
+      const cmpParc = (pa || "zzz").localeCompare(pb || "zzz", undefined, { numeric: true, sensitivity: "base" });
+      if (cmpParc !== 0) return cmpParc;
+      return (pja || "zzz").localeCompare(pjb || "zzz", undefined, { numeric: true, sensitivity: "base" });
     });
   }, [filtrados]);
 
-  // Pivot: parceiro -> periodo -> total
+  // Pivot: rowKey -> periodo -> total
   const pivot = useMemo(() => {
     const map = new Map<string, Map<string, number>>();
     for (const l of filtrados) {
-      const parc = l.codparc ?? "";
-      if (!map.has(parc)) map.set(parc, new Map());
-      const inner = map.get(parc)!;
+      const k = rowKey(l.codparc, l.codproj);
+      if (!map.has(k)) map.set(k, new Map());
+      const inner = map.get(k)!;
       inner.set(l.periodo, (inner.get(l.periodo) ?? 0) + l.valor);
     }
     return map;
@@ -129,43 +135,49 @@ export default function GestaoFundosConsultoriaPage() {
     const tot = new Map<string, number>();
     periodos.forEach(p => {
       let sum = 0;
-      parceiros.forEach(parc => { sum += pivot.get(parc)?.get(p) ?? 0; });
+      rowKeys.forEach(k => { sum += pivot.get(k)?.get(p) ?? 0; });
       tot.set(p, sum);
     });
     return tot;
-  }, [pivot, parceiros, periodos]);
+  }, [pivot, rowKeys, periodos]);
 
   // Row totals
   const rowTotals = useMemo(() => {
     const tot = new Map<string, number>();
-    parceiros.forEach(parc => {
-      const inner = pivot.get(parc);
-      tot.set(parc, inner ? Array.from(inner.values()).reduce((s, v) => s + v, 0) : 0);
+    rowKeys.forEach(k => {
+      const inner = pivot.get(k);
+      tot.set(k, inner ? Array.from(inner.values()).reduce((s, v) => s + v, 0) : 0);
     });
     return tot;
-  }, [pivot, parceiros]);
+  }, [pivot, rowKeys]);
 
   const grandTotal = useMemo(() =>
     Array.from(colTotals.values()).reduce((s, v) => s + v, 0),
     [colTotals]
   );
 
-  // Naturezas matched (for info display)
   const natCodsAtivos = aba === "gestao" ? natCodsGestao : natCodsConsultoria;
   const natMatchadas = useMemo(() =>
     natRows.filter(r => natCodsAtivos.has(r.CODNAT)),
     [natRows, natCodsAtivos]
   );
 
-  // Filter parceiros by busca
-  const parceirosFiltered = useMemo(() => {
-    if (!busca.trim()) return parceiros;
+  // Filter by busca (parceiro ou projeto)
+  const rowKeysFiltered = useMemo(() => {
+    if (!busca.trim()) return rowKeys;
     const q = busca.toLowerCase();
-    return parceiros.filter(p => {
-      if (!p) return "sem parceiro".includes(q);
-      return p.toLowerCase().includes(q) || (parcMap.get(p) ?? "").toLowerCase().includes(q);
+    return rowKeys.filter(k => {
+      const [parc, proj] = k.split("|");
+      const parcNome = parcMap.get(parc) ?? "";
+      const projIdent = projMap.get(proj) ?? "";
+      return (
+        parc.toLowerCase().includes(q) ||
+        parcNome.toLowerCase().includes(q) ||
+        proj.toLowerCase().includes(q) ||
+        projIdent.toLowerCase().includes(q)
+      );
     });
-  }, [parceiros, busca, parcMap]);
+  }, [rowKeys, busca, parcMap, projMap]);
 
   if (!dataLoaded) {
     return (
@@ -215,7 +227,7 @@ export default function GestaoFundosConsultoriaPage() {
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
               type="text"
-              placeholder="Buscar parceiro…"
+              placeholder="Buscar parceiro ou projeto…"
               value={busca}
               onChange={e => setBusca(e.target.value)}
               className="w-full pl-8 pr-3 py-2 border border-gray-200 rounded-lg text-sm text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -223,7 +235,7 @@ export default function GestaoFundosConsultoriaPage() {
           </div>
 
           <span className="ml-auto text-xs text-gray-400">
-            {parceirosFiltered.length} parceiro{parceirosFiltered.length !== 1 ? "s" : ""}
+            {rowKeysFiltered.length} linha{rowKeysFiltered.length !== 1 ? "s" : ""}
             {" · "}
             {periodos.length} período{periodos.length !== 1 ? "s" : ""}
           </span>
@@ -248,7 +260,7 @@ export default function GestaoFundosConsultoriaPage() {
             <p className="text-gray-500 font-medium">Nenhum lançamento encontrado</p>
             <p className="text-gray-400 text-sm mt-1">
               {natMatchadas.length === 0
-                ? <>Nenhuma natureza encontrada com <span className="font-semibold">"{ABA_LABEL[aba]}"</span> na descrição.</>
+                ? <>Nenhuma natureza com <span className="font-semibold">"{ABA_LABEL[aba]}"</span> na descrição.</>
                 : "Nenhum lançamento para as naturezas identificadas no período selecionado."
               }
             </p>
@@ -272,10 +284,17 @@ export default function GestaoFundosConsultoriaPage() {
               <table className="text-sm border-collapse min-w-max w-full">
                 <thead>
                   <tr style={{ background: "#1e3a5f" }}>
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[240px]"
+                    {/* Col 1 — Parceiro */}
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[220px]"
                       style={{ background: "#1e3a5f" }}>
                       Parceiro
                     </th>
+                    {/* Col 2 — Identificação (Projeto) */}
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky z-20 min-w-[200px] border-l border-white/10"
+                      style={{ background: "#1e3a5f", left: "220px" }}>
+                      Identificação
+                    </th>
+                    {/* Month columns */}
                     {periodos.map(p => (
                       <th key={p}
                         className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap"
@@ -291,30 +310,44 @@ export default function GestaoFundosConsultoriaPage() {
                 </thead>
 
                 <tbody>
-                  {parceirosFiltered.map((parc, i) => {
-                    const inner  = pivot.get(parc);
-                    const rowTot = rowTotals.get(parc) ?? 0;
-                    const nome   = parc ? (parcMap.get(parc) ?? parc) : "Sem parceiro";
-                    const rowBg  = i % 2 === 0 ? "white" : "#f9fafb";
+                  {rowKeysFiltered.map((k, i) => {
+                    const [parc, proj] = k.split("|");
+                    const inner   = pivot.get(k);
+                    const rowTot  = rowTotals.get(k) ?? 0;
+                    const parcNome = parc ? (parcMap.get(parc) ?? parc) : null;
+                    const projIdent = proj ? (projMap.get(proj) ?? proj) : null;
+                    const rowBg   = i % 2 === 0 ? "white" : "#f9fafb";
 
                     return (
-                      <tr key={parc || "__sem__"}
+                      <tr key={k}
                         className="border-b border-gray-50 hover:bg-blue-50/40 transition-colors"
                         style={{ background: rowBg }}>
 
+                        {/* Parceiro — sticky col 1 */}
                         <td className="px-4 py-2 sticky left-0 z-10 border-r border-gray-100"
                           style={{ background: rowBg }}>
-                          <div className="flex flex-col">
-                            {parc
-                              ? <>
-                                  <span className="font-mono text-xs text-blue-700 font-semibold">{parc}</span>
-                                  <span className="text-xs text-gray-600 truncate max-w-[200px]" title={nome}>{nome}</span>
-                                </>
-                              : <span className="text-xs text-gray-400 italic">Sem parceiro</span>
-                            }
-                          </div>
+                          {parc
+                            ? <div className="flex flex-col">
+                                <span className="font-mono text-xs text-blue-700 font-semibold">{parc}</span>
+                                <span className="text-xs text-gray-600 truncate max-w-[180px]" title={parcNome ?? ""}>{parcNome}</span>
+                              </div>
+                            : <span className="text-xs text-gray-400 italic">Sem parceiro</span>
+                          }
                         </td>
 
+                        {/* Identificação (Projeto) — sticky col 2 */}
+                        <td className="px-4 py-2 sticky z-10 border-r border-gray-100"
+                          style={{ background: rowBg, left: "220px" }}>
+                          {proj
+                            ? <div className="flex flex-col">
+                                <span className="font-mono text-xs text-gray-500 font-semibold">{proj}</span>
+                                <span className="text-xs text-gray-700 truncate max-w-[160px]" title={projIdent ?? ""}>{projIdent}</span>
+                              </div>
+                            : <span className="text-xs text-gray-300">—</span>
+                          }
+                        </td>
+
+                        {/* Valores por mês */}
                         {periodos.map(p => {
                           const v = inner?.get(p) ?? 0;
                           return (
@@ -324,6 +357,7 @@ export default function GestaoFundosConsultoriaPage() {
                           );
                         })}
 
+                        {/* Total da linha */}
                         <td className={`px-4 py-2 text-right tabular-nums text-xs font-semibold whitespace-nowrap border-l border-gray-100 ${rowTot < 0 ? "text-red-600" : "text-gray-800"}`}>
                           {fmtBRL(rowTot)}
                         </td>
@@ -331,22 +365,24 @@ export default function GestaoFundosConsultoriaPage() {
                     );
                   })}
 
-                  {parceirosFiltered.length === 0 && (
+                  {rowKeysFiltered.length === 0 && (
                     <tr>
-                      <td colSpan={periodos.length + 2} className="px-4 py-10 text-center text-gray-400 text-sm">
-                        Nenhum parceiro encontrado para "{busca}".
+                      <td colSpan={periodos.length + 3} className="px-4 py-10 text-center text-gray-400 text-sm">
+                        Nenhum resultado para "{busca}".
                       </td>
                     </tr>
                   )}
                 </tbody>
 
-                {parceirosFiltered.length > 0 && (
+                {rowKeysFiltered.length > 0 && (
                   <tfoot>
                     <tr style={{ background: "#f0f4f8" }}>
                       <td className="px-4 py-2.5 text-xs font-bold text-gray-700 uppercase tracking-wide sticky left-0 z-10 border-t border-gray-200 border-r border-gray-100"
                         style={{ background: "#f0f4f8" }}>
                         Total
                       </td>
+                      <td className="px-4 py-2.5 sticky z-10 border-t border-gray-200 border-r border-gray-100"
+                        style={{ background: "#f0f4f8", left: "220px" }} />
                       {periodos.map(p => {
                         const v = colTotals.get(p) ?? 0;
                         return (
