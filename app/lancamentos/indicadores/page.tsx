@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { Plus, Trash2, Pencil, Search, Upload, X, AlertTriangle, ChevronLeft, ChevronRight, Download, Clock, FileText } from "lucide-react";
+import { Plus, Trash2, Pencil, Search, Upload, X, AlertTriangle, ChevronLeft, ChevronRight, Download, Clock, FileText, Copy } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { usePersistedData, loadData } from "@/lib/storage";
 import type { LancamentoIndicador, IndicadorRow, UnidadeIndicador, ImportacaoIndicador } from "@/lib/mockData";
@@ -421,6 +421,111 @@ function ImportModal({ tipo, periodo, indRows, onImport, onClose }: {
   );
 }
 
+// ─── Modal edição em lote ─────────────────────────────────────────────────────
+
+function BulkEditModal({ count, indRows, onSave, onClose }: {
+  count: number;
+  indRows: IndicadorRow[];
+  onSave: (patch: Partial<Pick<LancamentoIndicador, "data" | "periodo" | "cod_indicador" | "unidade" | "valor">>) => void;
+  onClose: () => void;
+}) {
+  const [applyData,    setApplyData]    = useState(false);
+  const [applyInd,     setApplyInd]     = useState(false);
+  const [applyUnidade, setApplyUnidade] = useState(false);
+  const [applyValor,   setApplyValor]   = useState(false);
+  const [dataVal,      setDataVal]      = useState("");
+  const [codInd,       setCodInd]       = useState("");
+  const [unidade,      setUnidade]      = useState<UnidadeIndicador>("valor");
+  const [valorInput,   setValorInput]   = useState("");
+  const indLeaves = useMemo(() => indRows.filter(r => r.tipo === "INDICADOR"), [indRows]);
+
+  function handleSave() {
+    const patch: Partial<Pick<LancamentoIndicador, "data" | "periodo" | "cod_indicador" | "unidade" | "valor">> = {};
+    if (applyData    && dataVal)    { patch.data = dataVal; patch.periodo = dataToPeriodo(dataVal); }
+    if (applyInd     && codInd)     patch.cod_indicador = codInd;
+    if (applyUnidade)               patch.unidade = unidade;
+    if (applyValor) {
+      const v = parseValor(valorInput);
+      if (v === null) { alert("Valor inválido."); return; }
+      patch.valor = v;
+    }
+    if (Object.keys(patch).length === 0) { alert("Ative pelo menos um campo para editar."); return; }
+    onSave(patch);
+  }
+
+  function Field({ label, active, onToggle, children }: { label: string; active: boolean; onToggle: () => void; children: React.ReactNode }) {
+    return (
+      <div className={`p-3 rounded-lg border transition-all ${active ? "border-blue-300 bg-blue-50" : "border-gray-200 bg-white"}`}>
+        <label className="flex items-center gap-2 cursor-pointer mb-2">
+          <input type="checkbox" checked={active} onChange={onToggle} className="w-4 h-4 rounded" style={{ accentColor: "#1e3a5f" }} />
+          <span className={`text-xs font-semibold uppercase tracking-wide ${active ? "text-blue-700" : "text-gray-500"}`}>{label}</span>
+        </label>
+        {active && children}
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 flex flex-col" style={{ maxHeight: "90vh" }}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
+          <div>
+            <h2 className="text-base font-semibold text-gray-800">Editar em lote</h2>
+            <p className="text-xs text-gray-400 mt-0.5">{count} lançamento{count !== 1 ? "s" : ""} selecionado{count !== 1 ? "s" : ""}</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400"><X size={16} /></button>
+        </div>
+        <div className="overflow-y-auto flex-1 p-5 space-y-3">
+          <p className="text-xs text-gray-400">Ative os campos que deseja alterar. Apenas eles serão atualizados.</p>
+
+          <Field label="Data" active={applyData} onToggle={() => setApplyData(v => !v)}>
+            <input type="date"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={dataVal} onChange={e => setDataVal(e.target.value)} />
+          </Field>
+
+          <Field label="Indicador" active={applyInd} onToggle={() => setApplyInd(v => !v)}>
+            <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              value={codInd} onChange={e => setCodInd(e.target.value)}>
+              <option value="">— Selecionar —</option>
+              {indLeaves.map(r => (
+                <option key={r.id} value={r.codigo ?? r.id}>
+                  {r.codigo ? `${r.codigo} — ` : ""}{r.nome}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Unidade" active={applyUnidade} onToggle={() => setApplyUnidade(v => !v)}>
+            <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+              {([["valor", "Valor (R$)"], ["percentual", "Percentual (%)"]] as [UnidadeIndicador, string][]).map(([v, l]) => (
+                <button key={v} type="button" onClick={() => setUnidade(v)}
+                  className="flex-1 py-2 text-sm font-medium transition-colors"
+                  style={unidade === v ? { background: "#1e3a5f", color: "white" } : { background: "white", color: "#374151" }}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Valor" active={applyValor} onToggle={() => setApplyValor(v => !v)}>
+            <input type="text" inputMode="decimal"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={valorInput} onChange={e => setValorInput(e.target.value)} placeholder="0,00" />
+          </Field>
+        </div>
+        <div className="flex justify-end gap-3 px-5 py-4 border-t border-gray-200 flex-shrink-0">
+          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg">Cancelar</button>
+          <button onClick={handleSave} className="px-4 py-2 text-sm font-medium text-white rounded-lg" style={{ background: "#1e3a5f" }}>
+            Aplicar alterações
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Histórico de importações ─────────────────────────────────────────────────
 
 function HistoricoTab({ historico, lancamentos, onExcluir, onImportar }: {
@@ -504,12 +609,18 @@ export default function LancamentosIndicadoresPage() {
   const [mes, setMes] = useState(mesHoje);
   const [tipo, setTipo] = useState<Tipo>("realizado");
   const [search, setSearch] = useState("");
+  const [verTodos, setVerTodos] = useState(false);
 
   const [aba, setAba] = useState<Aba>("lancamentos");
   const [data, setData] = usePersistedData<LancamentoIndicador[]>("portal_lancamentos_indicadores", []);
   const [historico, setHistorico] = usePersistedData<ImportacaoIndicador[]>("portal_importacoes_indicadores", []);
   const [modal, setModal] = useState<{ open: boolean; modo: "add" | "edit"; form: Partial<LancamentoIndicador> } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [bulkEditOpen, setBulkEditOpen] = useState(false);
+
+  // multi-select
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const lastClickIdx = useRef<number | null>(null);
 
   const indRows = useMemo(() => loadData<IndicadorRow[]>("portal_indicadores", []), []);
   const periodo = periodoStr(ano, mes);
@@ -521,14 +632,18 @@ export default function LancamentosIndicadoresPage() {
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return data.filter(r => {
-      if (r.tipo !== tipo || r.periodo !== periodo) return false;
+      if (r.tipo !== tipo) return false;
+      if (!verTodos && r.periodo !== periodo) return false;
       if (!q) return true;
       return (
         r.cod_indicador.toLowerCase().includes(q) ||
         (indMap.get(r.cod_indicador) || "").toLowerCase().includes(q)
       );
     });
-  }, [data, tipo, periodo, search, indMap]);
+  }, [data, tipo, periodo, search, indMap, verTodos]);
+
+  // Clear selection when filters change
+  useEffect(() => { setSelected(new Set()); lastClickIdx.current = null; }, [tipo, periodo, verTodos]);
 
   function navMes(delta: number) {
     let m = mes + delta, a = ano;
@@ -548,14 +663,7 @@ export default function LancamentosIndicadoresPage() {
 
   function handleImport(rows: Omit<LancamentoIndicador, "id">[]) {
     const importacaoId = `imp_${Date.now()}`;
-    const registro: ImportacaoIndicador = {
-      id: importacaoId,
-      tipo,
-      periodo,
-      criadoEm: new Date().toISOString(),
-      totalLinhas: rows.length,
-    };
-    setHistorico(h => [...h, registro]);
+    setHistorico(h => [...h, { id: importacaoId, tipo, periodo, criadoEm: new Date().toISOString(), totalLinhas: rows.length }]);
     setData(d => {
       const sem   = d.filter(r => !(r.tipo === tipo && r.periodo === periodo));
       const novos = rows.map(r => ({ ...r, importacaoId, id: `li_${Date.now()}_${Math.random().toString(36).slice(2)}` }));
@@ -573,14 +681,71 @@ export default function LancamentosIndicadoresPage() {
     if (confirm("Remover este lançamento?")) setData(d => d.filter(r => r.id !== id));
   }
 
-  const totalValor = filtered.reduce((s, r) => s + r.valor, 0);
+  // ── Seleção ──────────────────────────────────────────────────────────────────
+
+  function handleCheckbox(id: string, idx: number, e: React.MouseEvent) {
+    if (e.shiftKey && lastClickIdx.current !== null) {
+      const from = Math.min(lastClickIdx.current, idx);
+      const to   = Math.max(lastClickIdx.current, idx);
+      setSelected(prev => {
+        const next = new Set(prev);
+        const ids  = filtered.slice(from, to + 1).map(r => r.id);
+        const anyOff = ids.some(i => !next.has(i));
+        ids.forEach(i => anyOff ? next.add(i) : next.delete(i));
+        return next;
+      });
+    } else {
+      setSelected(prev => {
+        const next = new Set(prev);
+        next.has(id) ? next.delete(id) : next.add(id);
+        return next;
+      });
+      lastClickIdx.current = idx;
+    }
+  }
+
+  function toggleSelectAll() {
+    setSelected(selected.size === filtered.length && filtered.length > 0
+      ? new Set()
+      : new Set(filtered.map(r => r.id))
+    );
+  }
+
+  // ── Operações em lote ────────────────────────────────────────────────────────
+
+  function handleBulkDelete() {
+    if (!confirm(`Excluir ${selected.size} lançamento${selected.size !== 1 ? "s" : ""}?`)) return;
+    setData(d => d.filter(r => !selected.has(r.id)));
+    setSelected(new Set());
+  }
+
+  function handleDuplicate() {
+    const rows = filtered.filter(r => selected.has(r.id));
+    const novos = rows.map(r => ({
+      ...r,
+      id: `li_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      importacaoId: undefined,
+    }));
+    setData(d => [...d, ...novos]);
+    setSelected(new Set());
+  }
+
+  function handleBulkSave(patch: Partial<Pick<LancamentoIndicador, "data" | "periodo" | "cod_indicador" | "unidade" | "valor">>) {
+    setData(d => d.map(r => selected.has(r.id) ? { ...r, ...patch } : r));
+    setSelected(new Set());
+    setBulkEditOpen(false);
+  }
+
+  const totalValor  = filtered.reduce((s, r) => s + r.valor, 0);
+  const allChecked  = filtered.length > 0 && selected.size === filtered.length;
+  const someChecked = selected.size > 0 && selected.size < filtered.length;
 
   return (
     <div>
       <PageHeader
         title="Lançamentos de Indicadores"
         subtitle={aba === "lancamentos"
-          ? `${filtered.length} lançamento${filtered.length !== 1 ? "s" : ""} · ${periodoLabel(periodo)}`
+          ? `${filtered.length} lançamento${filtered.length !== 1 ? "s" : ""}${verTodos ? "" : ` · ${periodoLabel(periodo)}`}`
           : `${historico.length} importação${historico.length !== 1 ? "ões" : ""}`}>
         <button onClick={() => setImportOpen(true)}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
@@ -624,7 +789,8 @@ export default function LancamentosIndicadoresPage() {
 
         {aba === "lancamentos" && (
           <>
-            <div className="flex items-center gap-4 flex-wrap">
+            {/* ── Filtros ── */}
+            <div className="flex items-center gap-3 flex-wrap">
               <div className="flex rounded-lg border border-gray-200 overflow-hidden">
                 {(["realizado", "orcado"] as Tipo[]).map(t => (
                   <button key={t} onClick={() => setTipo(t)}
@@ -635,11 +801,22 @@ export default function LancamentosIndicadoresPage() {
                 ))}
               </div>
 
-              <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-2 bg-white">
-                <button onClick={() => navMes(-1)} className="p-0.5 hover:text-blue-600 transition-colors"><ChevronLeft size={15} /></button>
-                <span className="text-sm font-semibold text-gray-700 w-24 text-center">{periodoLabel(periodo)}</span>
-                <button onClick={() => navMes(1)} className="p-0.5 hover:text-blue-600 transition-colors"><ChevronRight size={15} /></button>
-              </div>
+              {!verTodos && (
+                <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-2 bg-white">
+                  <button onClick={() => navMes(-1)} className="p-0.5 hover:text-blue-600 transition-colors"><ChevronLeft size={15} /></button>
+                  <span className="text-sm font-semibold text-gray-700 w-24 text-center">{periodoLabel(periodo)}</span>
+                  <button onClick={() => navMes(1)} className="p-0.5 hover:text-blue-600 transition-colors"><ChevronRight size={15} /></button>
+                </div>
+              )}
+
+              <button
+                onClick={() => setVerTodos(v => !v)}
+                className="px-3 py-2 text-sm font-medium border rounded-lg transition-colors"
+                style={verTodos
+                  ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" }
+                  : { background: "white", color: "#374151", borderColor: "#e5e7eb" }}>
+                Ver todos os períodos
+              </button>
 
               <div className="relative ml-auto">
                 <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -649,11 +826,52 @@ export default function LancamentosIndicadoresPage() {
               </div>
             </div>
 
+            {/* ── Barra de ações em lote ── */}
+            {selected.size > 0 && (
+              <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg border border-blue-200 bg-blue-50">
+                <span className="text-sm font-semibold text-blue-700">
+                  {selected.size} selecionado{selected.size !== 1 ? "s" : ""}
+                </span>
+                <div className="flex items-center gap-2 ml-2">
+                  <button onClick={handleDuplicate}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 transition-colors">
+                    <Copy size={12} /> Duplicar
+                  </button>
+                  <button onClick={() => setBulkEditOpen(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 transition-colors">
+                    <Pencil size={12} /> Editar em lote
+                  </button>
+                  <button onClick={handleBulkDelete}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-red-200 bg-white hover:bg-red-50 text-red-600 transition-colors">
+                    <Trash2 size={12} /> Excluir
+                  </button>
+                </div>
+                <button onClick={() => setSelected(new Set())}
+                  className="ml-auto text-xs text-blue-500 hover:underline">
+                  Desmarcar todos
+                </button>
+              </div>
+            )}
+
+            {/* ── Tabela ── */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr style={{ background: "#f8fafc" }}>
+                      {/* Checkbox header */}
+                      <th className="px-3 py-2.5 w-10">
+                        <input
+                          type="checkbox"
+                          checked={allChecked}
+                          ref={el => { if (el) el.indeterminate = someChecked; }}
+                          onChange={toggleSelectAll}
+                          className="w-4 h-4 rounded cursor-pointer"
+                          style={{ accentColor: "#1e3a5f" }} />
+                      </th>
+                      {verTodos && (
+                        <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-24">Período</th>
+                      )}
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-28">Data</th>
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left">Indicador</th>
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-right w-36">Valor</th>
@@ -661,43 +879,78 @@ export default function LancamentosIndicadoresPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filtered.map(row => (
-                      <tr key={row.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                        <td className="px-4 py-2 text-xs text-gray-600 tabular-nums whitespace-nowrap">
-                          {row.data
-                            ? new Date(row.data + "T00:00:00").toLocaleDateString("pt-BR")
-                            : <span className="text-gray-300">—</span>}
-                        </td>
-                        <td className="px-4 py-2">
-                          <span className="font-mono text-xs font-semibold text-blue-700">{row.cod_indicador}</span>
-                          {indMap.get(row.cod_indicador) && (
-                            <span className="text-xs text-gray-500 ml-1.5">{indMap.get(row.cod_indicador)}</span>
+                    {filtered.map((row, idx) => {
+                      const isSel = selected.has(row.id);
+                      return (
+                        <tr key={row.id}
+                          className="border-b border-gray-100 hover:bg-gray-50 transition-colors"
+                          style={isSel ? { background: "#eff6ff" } : undefined}>
+                          {/* Checkbox */}
+                          <td className="px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={isSel}
+                              onClick={e => handleCheckbox(row.id, idx, e as React.MouseEvent)}
+                              onChange={() => {}}
+                              className="w-4 h-4 rounded cursor-pointer"
+                              style={{ accentColor: "#1e3a5f" }}
+                              title="Shift+clique para selecionar intervalo" />
+                          </td>
+                          {verTodos && (
+                            <td className="px-4 py-2 text-xs text-gray-500 tabular-nums whitespace-nowrap">
+                              {periodoLabel(row.periodo)}
+                            </td>
                           )}
-                        </td>
-                        <td className="px-4 py-2 text-right whitespace-nowrap">
-                          <span className={`text-sm font-semibold tabular-nums ${row.valor < 0 ? "text-red-600" : "text-gray-800"}`}>
-                            {row.unidade === "percentual"
-                              ? `${row.valor.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`
-                              : row.valor.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
-                          </span>
-                          {row.unidade === "percentual" && (
-                            <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700">%</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-2">
-                          <div className="flex items-center justify-center gap-1">
-                            <button onClick={() => setModal({ open: true, modo: "edit", form: { ...row } })}
-                              className="p-1.5 hover:bg-blue-100 rounded-lg text-blue-600 transition-colors"><Pencil size={13} /></button>
-                            <button onClick={() => handleDelete(row.id)}
-                              className="p-1.5 hover:bg-red-100 rounded-lg text-red-500 transition-colors"><Trash2 size={13} /></button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                          <td className="px-4 py-2 text-xs text-gray-600 tabular-nums whitespace-nowrap">
+                            {row.data
+                              ? new Date(row.data + "T00:00:00").toLocaleDateString("pt-BR")
+                              : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2">
+                            <span className="font-mono text-xs font-semibold text-blue-700">{row.cod_indicador}</span>
+                            {indMap.get(row.cod_indicador) && (
+                              <span className="text-xs text-gray-500 ml-1.5">{indMap.get(row.cod_indicador)}</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-right whitespace-nowrap">
+                            <span className={`text-sm font-semibold tabular-nums ${row.valor < 0 ? "text-red-600" : "text-gray-800"}`}>
+                              {row.unidade === "percentual"
+                                ? `${row.valor.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`
+                                : row.valor.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                            </span>
+                            {row.unidade === "percentual" && (
+                              <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-700">%</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2">
+                            <div className="flex items-center justify-center gap-1">
+                              <button onClick={() => setModal({ open: true, modo: "edit", form: { ...row } })}
+                                className="p-1.5 hover:bg-blue-100 rounded-lg text-blue-600 transition-colors" title="Editar">
+                                <Pencil size={13} />
+                              </button>
+                              <button
+                                onClick={() => {
+                                  const novo = { ...row, id: `li_${Date.now()}_${Math.random().toString(36).slice(2)}`, importacaoId: undefined };
+                                  setData(d => [...d, novo]);
+                                }}
+                                className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500 transition-colors" title="Duplicar">
+                                <Copy size={13} />
+                              </button>
+                              <button onClick={() => handleDelete(row.id)}
+                                className="p-1.5 hover:bg-red-100 rounded-lg text-red-500 transition-colors" title="Excluir">
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {filtered.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="px-4 py-10 text-center text-gray-400 text-sm">
-                          Nenhum lançamento para {periodoLabel(periodo)} — {tipo === "realizado" ? "Realizado" : "Orçado"}.
+                        <td colSpan={verTodos ? 6 : 5} className="px-4 py-10 text-center text-gray-400 text-sm">
+                          {verTodos
+                            ? `Nenhum lançamento de ${tipo === "realizado" ? "Realizado" : "Orçado"}.`
+                            : `Nenhum lançamento para ${periodoLabel(periodo)} — ${tipo === "realizado" ? "Realizado" : "Orçado"}.`}
                         </td>
                       </tr>
                     )}
@@ -705,7 +958,12 @@ export default function LancamentosIndicadoresPage() {
                   {filtered.length > 0 && (
                     <tfoot>
                       <tr style={{ background: "#f8fafc" }}>
-                        <td colSpan={2} className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase">Total</td>
+                        <td colSpan={verTodos ? 3 : 2} className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase">
+                          {selected.size > 0 ? `${selected.size} selecionado${selected.size !== 1 ? "s" : ""}` : "Total"}
+                        </td>
+                        <td className="px-4 py-2.5 text-left text-xs text-gray-500 uppercase font-semibold">
+                          {filtered.length.toLocaleString("pt-BR")} linha{filtered.length !== 1 ? "s" : ""}
+                        </td>
                         <td className="px-4 py-2.5 text-right">
                           <span className={`text-sm font-bold tabular-nums ${totalValor < 0 ? "text-red-600" : "text-gray-800"}`}>
                             {totalValor.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
@@ -734,6 +992,14 @@ export default function LancamentosIndicadoresPage() {
           tipo={tipo} periodo={periodo}
           indRows={indRows}
           onImport={handleImport} onClose={() => setImportOpen(false)} />
+      )}
+
+      {bulkEditOpen && (
+        <BulkEditModal
+          count={selected.size}
+          indRows={indRows}
+          onSave={handleBulkSave}
+          onClose={() => setBulkEditOpen(false)} />
       )}
     </div>
   );
