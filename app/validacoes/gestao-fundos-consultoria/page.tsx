@@ -5,7 +5,7 @@ import { Search } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { loadData, usePersistedData } from "@/lib/storage";
 import { idbGet } from "@/lib/idb";
-import type { LancamentoFinanceiro, Fechamento, EmpresaRow, ParceiroRow } from "@/lib/mockData";
+import type { LancamentoFinanceiro, Fechamento, NaturezaRow, ParceiroRow } from "@/lib/mockData";
 
 type Aba = "gestao" | "consultoria";
 
@@ -16,10 +16,10 @@ const ABA_LABEL: Record<Aba, string> = {
   consultoria: "Consultoria Especializada",
 };
 
-// AD_EMPCLASS values that map to each tab
-const ABA_CLASS: Record<Aba, string> = {
-  gestao:      "Gestão de Fundos",
-  consultoria: "Consultoria Especializada",
+// Substring to match in DESCRNAT (case-insensitive)
+const ABA_DESCRNAT: Record<Aba, string> = {
+  gestao:      "gestão de fundos",
+  consultoria: "consultoria especializada",
 };
 
 function periodoLabel(p: string) {
@@ -28,7 +28,7 @@ function periodoLabel(p: string) {
   return `${MESES[parseInt(m) - 1]}/${y.slice(2)}`;
 }
 
-function fmtBRL(v: number) {
+function fmtBRLCell(v: number) {
   if (v === 0) return <span className="text-gray-300">—</span>;
   return (
     <span className={v < 0 ? "text-red-600" : undefined}>
@@ -37,7 +37,7 @@ function fmtBRL(v: number) {
   );
 }
 
-function fmtBRLTotal(v: number) {
+function fmtBRL(v: number) {
   return v.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
@@ -49,11 +49,21 @@ export default function GestaoFundosConsultoriaPage() {
   const [fechamentoId, setFechamentoId] = useState("__todos__");
   const [busca, setBusca] = useState("");
 
-  const empRows  = useMemo(() => loadData<EmpresaRow[]>("portal_empresas", []), []);
+  const natRows  = useMemo(() => loadData<NaturezaRow[]>("portal_natureza", []), []);
   const parcRows = useMemo(() => loadData<ParceiroRow[]>("portal_parceiro", []), []);
 
-  const empMap  = useMemo(() => new Map(empRows.map(r => [r.CODEMP,  r])),         [empRows]);
+  const natMap  = useMemo(() => new Map(natRows.map(r => [r.CODNAT,  r])),           [natRows]);
   const parcMap = useMemo(() => new Map(parcRows.map(r => [r.CODPARC, r.NOMEPARC])), [parcRows]);
+
+  // Natureza codes that match each tab by DESCRNAT
+  const natCodsGestao = useMemo(() =>
+    new Set(natRows.filter(r => r.DESCRNAT.toLowerCase().includes(ABA_DESCRNAT.gestao)).map(r => r.CODNAT)),
+    [natRows]
+  );
+  const natCodsConsultoria = useMemo(() =>
+    new Set(natRows.filter(r => r.DESCRNAT.toLowerCase().includes(ABA_DESCRNAT.consultoria)).map(r => r.CODNAT)),
+    [natRows]
+  );
 
   useEffect(() => {
     const fallback = setTimeout(() => setDataLoaded(true), 400);
@@ -78,11 +88,11 @@ export default function GestaoFundosConsultoriaPage() {
     [lancamentos, fechamentoId]
   );
 
-  // Filter by current tab's AD_EMPCLASS
-  const classLabel = ABA_CLASS[aba];
+  // Filter by natureza codes of the active tab
+  const natCods = aba === "gestao" ? natCodsGestao : natCodsConsultoria;
   const filtrados = useMemo(() =>
-    lancamentosBase.filter(l => empMap.get(l.codemp)?.AD_EMPCLASS === classLabel),
-    [lancamentosBase, empMap, classLabel]
+    lancamentosBase.filter(l => natCods.has(l.codnat)),
+    [lancamentosBase, natCods]
   );
 
   // Unique periods sorted
@@ -91,7 +101,7 @@ export default function GestaoFundosConsultoriaPage() {
     [filtrados]
   );
 
-  // Unique parceiros (including "" for lançamentos without parceiro)
+  // Unique parceiros (including "" for sem parceiro)
   const parceiros = useMemo(() => {
     const set = new Set<string>();
     filtrados.forEach(l => set.add(l.codparc ?? ""));
@@ -130,8 +140,7 @@ export default function GestaoFundosConsultoriaPage() {
     const tot = new Map<string, number>();
     parceiros.forEach(parc => {
       const inner = pivot.get(parc);
-      if (!inner) { tot.set(parc, 0); return; }
-      tot.set(parc, Array.from(inner.values()).reduce((s, v) => s + v, 0));
+      tot.set(parc, inner ? Array.from(inner.values()).reduce((s, v) => s + v, 0) : 0);
     });
     return tot;
   }, [pivot, parceiros]);
@@ -141,7 +150,14 @@ export default function GestaoFundosConsultoriaPage() {
     [colTotals]
   );
 
-  // Filter by busca
+  // Naturezas matched (for info display)
+  const natCodsAtivos = aba === "gestao" ? natCodsGestao : natCodsConsultoria;
+  const natMatchadas = useMemo(() =>
+    natRows.filter(r => natCodsAtivos.has(r.CODNAT)),
+    [natRows, natCodsAtivos]
+  );
+
+  // Filter parceiros by busca
   const parceirosFiltered = useMemo(() => {
     if (!busca.trim()) return parceiros;
     const q = busca.toLowerCase();
@@ -213,12 +229,28 @@ export default function GestaoFundosConsultoriaPage() {
           </span>
         </div>
 
+        {/* Naturezas identificadas */}
+        {natMatchadas.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 items-center">
+            <span className="text-xs text-gray-400">Naturezas:</span>
+            {natMatchadas.map(n => (
+              <span key={n.CODNAT}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-100">
+                {n.CODNAT} <span className="font-sans font-normal text-blue-500">— {n.DESCRNAT}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* Sem dados */}
         {filtrados.length === 0 && (
           <div className="flex flex-col items-center justify-center py-20 bg-white rounded-xl border border-gray-100 text-center">
             <p className="text-gray-500 font-medium">Nenhum lançamento encontrado</p>
             <p className="text-gray-400 text-sm mt-1">
-              Verifique se as empresas estão classificadas como <span className="font-semibold">"{classLabel}"</span> no campo AD_EMPCLASS.
+              {natMatchadas.length === 0
+                ? <>Nenhuma natureza encontrada com <span className="font-semibold">"{ABA_LABEL[aba]}"</span> na descrição.</>
+                : "Nenhum lançamento para as naturezas identificadas no período selecionado."
+              }
             </p>
           </div>
         )}
@@ -231,7 +263,7 @@ export default function GestaoFundosConsultoriaPage() {
               <span className="text-xs text-gray-400">
                 Total geral:{" "}
                 <span className={`font-semibold tabular-nums ${grandTotal < 0 ? "text-red-600" : "text-gray-700"}`}>
-                  {fmtBRLTotal(grandTotal)}
+                  {fmtBRL(grandTotal)}
                 </span>
               </span>
             </div>
@@ -240,20 +272,19 @@ export default function GestaoFundosConsultoriaPage() {
               <table className="text-sm border-collapse min-w-max w-full">
                 <thead>
                   <tr style={{ background: "#1e3a5f" }}>
-                    {/* Parceiro header - sticky */}
                     <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-20 min-w-[240px]"
                       style={{ background: "#1e3a5f" }}>
                       Parceiro
                     </th>
                     {periodos.map(p => (
                       <th key={p}
-                        className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap sticky top-0 z-10"
-                        style={{ background: "#1e3a5f", minWidth: "90px" }}>
+                        className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap"
+                        style={{ minWidth: "90px" }}>
                         {periodoLabel(p)}
                       </th>
                     ))}
-                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-right whitespace-nowrap sticky top-0 z-10 border-l border-white/20"
-                      style={{ background: "#1e3a5f", minWidth: "110px" }}>
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-right whitespace-nowrap border-l border-white/20"
+                      style={{ minWidth: "110px" }}>
                       Total
                     </th>
                   </tr>
@@ -271,7 +302,6 @@ export default function GestaoFundosConsultoriaPage() {
                         className="border-b border-gray-50 hover:bg-blue-50/40 transition-colors"
                         style={{ background: rowBg }}>
 
-                        {/* Parceiro — sticky */}
                         <td className="px-4 py-2 sticky left-0 z-10 border-r border-gray-100"
                           style={{ background: rowBg }}>
                           <div className="flex flex-col">
@@ -285,19 +315,17 @@ export default function GestaoFundosConsultoriaPage() {
                           </div>
                         </td>
 
-                        {/* Valores por mês */}
                         {periodos.map(p => {
                           const v = inner?.get(p) ?? 0;
                           return (
                             <td key={p} className="px-3 py-2 text-right tabular-nums text-xs whitespace-nowrap">
-                              {fmtBRL(v)}
+                              {fmtBRLCell(v)}
                             </td>
                           );
                         })}
 
-                        {/* Total da linha */}
                         <td className={`px-4 py-2 text-right tabular-nums text-xs font-semibold whitespace-nowrap border-l border-gray-100 ${rowTot < 0 ? "text-red-600" : "text-gray-800"}`}>
-                          {fmtBRLTotal(rowTot)}
+                          {fmtBRL(rowTot)}
                         </td>
                       </tr>
                     );
@@ -312,7 +340,6 @@ export default function GestaoFundosConsultoriaPage() {
                   )}
                 </tbody>
 
-                {/* Totais por coluna */}
                 {parceirosFiltered.length > 0 && (
                   <tfoot>
                     <tr style={{ background: "#f0f4f8" }}>
@@ -324,12 +351,12 @@ export default function GestaoFundosConsultoriaPage() {
                         const v = colTotals.get(p) ?? 0;
                         return (
                           <td key={p} className={`px-3 py-2.5 text-right tabular-nums text-xs font-bold border-t border-gray-200 whitespace-nowrap ${v < 0 ? "text-red-600" : "text-gray-800"}`}>
-                            {fmtBRLTotal(v)}
+                            {fmtBRL(v)}
                           </td>
                         );
                       })}
                       <td className={`px-4 py-2.5 text-right tabular-nums text-xs font-bold border-t border-gray-200 border-l border-gray-100 whitespace-nowrap ${grandTotal < 0 ? "text-red-600" : "text-gray-800"}`}>
-                        {fmtBRLTotal(grandTotal)}
+                        {fmtBRL(grandTotal)}
                       </td>
                     </tr>
                   </tfoot>
