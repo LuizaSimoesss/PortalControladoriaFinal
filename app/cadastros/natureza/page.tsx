@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Plus, Pencil, Trash2, RefreshCw, Search, X, Filter } from "lucide-react";
 import { FilterSection, FilterCheckbox, FilterDrawerShell } from "@/components/FilterAccordion";
 import PageHeader from "@/components/PageHeader";
@@ -8,6 +8,7 @@ import { naturezaDataInicial, type NaturezaRow, type TipoRegistro } from "@/lib/
 import { buildHierarchy } from "@/lib/utils";
 import { loadConfig, loadSession, sankhyaQuery, QUERIES } from "@/lib/sankhya";
 import { usePersistedData, markStorageInitialized } from "@/lib/storage";
+import { idbGet } from "@/lib/idb";
 
 const CLASSIFICACAO_OPTS = ["RECEITA", "DEDUÇÕES", "IMPOSTOS", "DESPESA", "CUSTO", "VARIACAO"];
 const PACOTES_OPTS = ["", "Pessoal", "Certificação", "Ocupação", "Tecnologia", "Institucional", "Eventos", "Viagens", "Jurídico", "Incentivos", "Serviços Especializados"];
@@ -68,6 +69,16 @@ export default function NaturezaPage() {
     analitica: Array.isArray(filtros.analitica) ? filtros.analitica : [],
   };
   const filtrosAtivos = !!(nfiltros.tipo.length || nfiltros.grau.length || nfiltros.classificacao.length || nfiltros.ativa.length || nfiltros.analitica.length);
+
+  // One-time migration: deduplicate rows that may have colliding ids from index-based sync
+  useEffect(() => {
+    setData(prev => {
+      const seen = new Set<string>();
+      const deduped = prev.filter(r => { if (seen.has(r.id)) return false; seen.add(r.id); return true; });
+      return deduped.length < prev.length ? deduped : prev;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const withHierarchy = useMemo(() => buildHierarchy(
     [...data].sort((a, b) => a.CODNAT.localeCompare(b.CODNAT, undefined, { numeric: true, sensitivity: "base" })),
@@ -158,14 +169,33 @@ export default function NaturezaPage() {
     }
     try {
       markStorageInitialized();
+      // Merge IDB and React state so GERENCIAL rows survive regardless of
+      // which source is ahead: IDB may lag behind in-memory creations; React
+      // state may be empty if IDB hasn't loaded yet when sync is triggered.
+      const idbData = await idbGet<NaturezaRow[]>("portal_natureza", []);
       const { rows } = await sankhyaQuery(cfg, sess.bearerToken, QUERIES.NATUREZA);
-      const sankhyaRows: NaturezaRow[] = rows.map((r, i) => ({
-        id: `sync_nat_${i}`, CODNAT: String(r.CODNAT ?? ""), DESCRNAT: String(r.DESCRNAT ?? ""),
-        GRAU: Number(r.GRAU ?? 1), ANALITICA: r.ANALITICA === "S" || r.ANALITICA === true,
-        ATIVA: r.ATIVA === "S" || r.ATIVA === true, TIPO_REGISTRO: "NATIVO" as TipoRegistro,
-        ENTRA_RESULTADO: "DRE", CLASSIFICACAO: "", PACOTES: "",
-      }));
-      setData((prev) => [...sankhyaRows, ...prev.filter((r) => r.TIPO_REGISTRO === "GERENCIAL")]);
+      const gerencialById = new Map<string, NaturezaRow>([
+        ...(idbData ?? []).filter(r => r.TIPO_REGISTRO === "GERENCIAL").map(r => [r.id, r] as const),
+        ...data.filter(r => r.TIPO_REGISTRO === "GERENCIAL").map(r => [r.id, r] as const),
+      ]);
+      const existingNativo = new Map<string, NaturezaRow>([
+        ...(idbData ?? []).filter(r => r.TIPO_REGISTRO === "NATIVO").map(r => [r.CODNAT, r] as const),
+        ...data.filter(r => r.TIPO_REGISTRO === "NATIVO").map(r => [r.CODNAT, r] as const),
+      ]);
+      const uniqueRows = Array.from(new Map(rows.map(r => [String(r.CODNAT ?? ""), r])).values());
+      const sankhyaRows: NaturezaRow[] = uniqueRows.map((r) => {
+        const codnat = String(r.CODNAT ?? "");
+        const existing = existingNativo.get(codnat);
+        return {
+          id: existing?.id ?? `sync_nat_${codnat}`,
+          CODNAT: codnat, DESCRNAT: String(r.DESCRNAT ?? ""),
+          GRAU: Number(r.GRAU ?? 1), ANALITICA: r.ANALITICA === "S" || r.ANALITICA === true,
+          ATIVA: r.ATIVA === "S" || r.ATIVA === true, TIPO_REGISTRO: "NATIVO" as TipoRegistro,
+          ENTRA_RESULTADO: existing?.ENTRA_RESULTADO ?? "DRE",
+          CLASSIFICACAO: existing?.CLASSIFICACAO ?? "", PACOTES: existing?.PACOTES ?? "",
+        };
+      });
+      setData([...sankhyaRows, ...[...gerencialById.values()]]);
     } catch (err) {
       alert(`Erro: ${err instanceof Error ? err.message : err}\n\nConfigure a integração em Configurações.`);
     }
@@ -192,7 +222,7 @@ export default function NaturezaPage() {
            : { background: "white", color: "#6b7280", borderColor: "#d1d5db" };
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader title="Natureza" subtitle={`Tabela TGFNAT · ${data.length} registros`}>
         <button onClick={handleSync} disabled={syncing}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
@@ -204,8 +234,8 @@ export default function NaturezaPage() {
         </button>
       </PageHeader>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col flex-1 min-h-0">
           <div className="flex items-center gap-2 p-4 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -221,7 +251,7 @@ export default function NaturezaPage() {
             <span className="text-xs text-gray-400 ml-auto">{filtered.length} de {data.length} registros</span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100" style={{ background: "#f8fafc" }}>

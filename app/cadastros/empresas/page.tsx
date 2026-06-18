@@ -201,15 +201,21 @@ export default function EmpresasPage() {
     try {
       markStorageInitialized();
       const { rows } = await sankhyaQuery(cfg, sess.bearerToken, QUERIES.EMPRESAS);
-      const synced: EmpresaRow[] = rows.map((r, i) => ({
-        id: `sync_emp_${i}`,
-        CODEMP: String(r.CODEMP ?? ""),
-        RAZAOSOCIAL: String(r.RAZAOSOCIAL ?? ""),
-        TIPO_REGISTRO: "NATIVO" as TipoRegistro,
-        ENTRA_RESULTADO: "NÃO ENTRA",
-        AD_EMPCLASS: String(r.AD_EMPCLASS ?? ""),
-      }));
-      setData((prev) => [...synced, ...prev.filter((r) => r.TIPO_REGISTRO === "GERENCIAL")]);
+      setData((prev) => {
+        const existingMap = new Map(prev.filter(r => r.TIPO_REGISTRO === "NATIVO").map(r => [r.CODEMP, r]));
+        const synced: EmpresaRow[] = rows.map((r, i) => {
+          const existing = existingMap.get(String(r.CODEMP ?? ""));
+          return {
+            id: existing?.id ?? `sync_emp_${i}`,
+            CODEMP: String(r.CODEMP ?? ""),
+            RAZAOSOCIAL: String(r.RAZAOSOCIAL ?? ""),
+            TIPO_REGISTRO: "NATIVO" as TipoRegistro,
+            ENTRA_RESULTADO: existing?.ENTRA_RESULTADO ?? "DRE",
+            AD_EMPCLASS: String(r.AD_EMPCLASS ?? ""),
+          };
+        });
+        return [...synced, ...prev.filter(r => r.TIPO_REGISTRO === "GERENCIAL")];
+      });
     } catch (err) {
       alert(`Erro: ${err instanceof Error ? err.message : err}\n\nConfigure a integração em Configurações.`);
     }
@@ -258,7 +264,7 @@ export default function EmpresasPage() {
   function clearFilter() { setRascunho(filtrosVazios); }
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader title="Empresas" subtitle={`Tabela TSIEMP · ${data.length} empresas`}>
         <button
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
@@ -277,8 +283,8 @@ export default function EmpresasPage() {
         </button>
       </PageHeader>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col flex-1 min-h-0">
           <div className="flex items-center gap-2 p-4 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -301,7 +307,7 @@ export default function EmpresasPage() {
             <span className="text-xs text-gray-400 ml-auto">{filtered.length} de {data.length} registros</span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: "#f8fafc" }}>
@@ -330,7 +336,6 @@ export default function EmpresasPage() {
                           type="checkbox"
                           checked={isSel}
                           onChange={(e) => handleSelect(row.id, e.nativeEvent instanceof MouseEvent && (e.nativeEvent as MouseEvent).shiftKey)}
-                          onClick={(e) => handleSelect(row.id, e.shiftKey)}
                           className="rounded"
                         />
                       </td>

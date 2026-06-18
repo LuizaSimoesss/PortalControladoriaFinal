@@ -25,6 +25,7 @@ interface FonteIndicador {
 }
 
 interface FormulaItem { subtotalId: string; sinal: "+" | "-"; }
+interface FormulaBloco { id: string; label?: string; sinal: "+" | "-"; items: FormulaItem[]; }
 
 interface IndicadorRow {
   id: string;
@@ -35,7 +36,19 @@ interface IndicadorRow {
   descricao?: string;
   categoria?: "ESTOQUE" | "MENSAL";
   fontes?: FonteIndicador[];
-  formula?: FormulaItem[];
+  formula?: FormulaBloco[] | FormulaItem[];
+  acumulado?: boolean;
+}
+
+function getFormulaBlocos(formula: unknown): FormulaBloco[] {
+  if (!Array.isArray(formula) || formula.length === 0) return [];
+  if ((formula[0] as FormulaItem).subtotalId !== undefined)
+    return [{ id: `bloco_${Date.now()}`, sinal: "+", items: formula as FormulaItem[] }];
+  return formula as FormulaBloco[];
+}
+
+function newBloco(): FormulaBloco {
+  return { id: `bloco_${Date.now()}_${Math.random().toString(36).slice(2,6)}`, sinal: "+", items: [] };
 }
 
 type DemoItemTipo2 = "SUBTOTAL" | "CONTA";
@@ -335,28 +348,44 @@ function AddFonteForm({ tipo, dreItems, onAdd, onCancel }: { tipo: "DRE" | "DIRE
 
 // ─── ComposicaoChips ──────────────────────────────────────────────────────────
 
-function ComposicaoChips({ childCodes, totalDescendants, isOnDark, formula, subtotalMap }: {
+function ComposicaoChips({ childCodes, totalDescendants, isOnDark, formula, acumulado, subtotalMap }: {
   childCodes: string[]; totalDescendants: number; isOnDark: boolean;
-  formula?: FormulaItem[]; subtotalMap: Map<string, { code: string; nome: string }>;
+  formula?: FormulaBloco[] | FormulaItem[]; acumulado?: boolean;
+  subtotalMap: Map<string, { code: string; nome: string; tipo: IndicadorTipo }>;
 }) {
-  if (formula !== undefined) {
-    const safe = Array.isArray(formula) ? formula : [];
-    if (safe.length === 0) return <span style={{ opacity: 0.4 }} className="text-xs italic">Fórmula vazia</span>;
+  const blocos = formula !== undefined ? getFormulaBlocos(formula) : undefined;
+  if (blocos !== undefined) {
+    const totalItems = blocos.reduce((s, b) => s + b.items.length, 0);
+    if (blocos.length === 0 && !acumulado) return <span style={{ opacity: 0.4 }} className="text-xs italic">Fórmula vazia</span>;
     return (
       <div className="flex flex-wrap gap-1 items-center">
-        <span style={{ opacity: 0.5 }} className="text-[10px] mr-0.5">∑</span>
-        {safe.map(fi => {
-          const st = subtotalMap.get(fi.subtotalId);
-          if (!st) return null;
-          const bg = fi.sinal === "+"
-            ? (isOnDark ? "bg-emerald-400/25 text-emerald-200" : "bg-emerald-100 text-emerald-700")
-            : (isOnDark ? "bg-red-400/25 text-red-200" : "bg-red-100 text-red-700");
-          return (
-            <span key={fi.subtotalId} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold ${bg}`}>
-              {fi.sinal} {st.code}
-            </span>
-          );
-        })}
+        {acumulado && (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ${isOnDark ? "bg-white/20 text-white" : "bg-amber-100 text-amber-700"}`}>
+            ∑ acum
+          </span>
+        )}
+        {blocos.length === 0 && acumulado && null}
+        {blocos.map((bloco, bi) => (
+          <span key={bloco.id} className="inline-flex items-center gap-0.5">
+            {(bi > 0 || bloco.sinal === "-") && (
+              <span className={`font-bold text-[10px] ${isOnDark ? "text-white/60" : "text-gray-400"}`}>{bloco.sinal}</span>
+            )}
+            {bloco.label && <span className={`text-[10px] italic ${isOnDark ? "text-white/60" : "text-gray-400"}`}>{bloco.label}:</span>}
+            {bloco.items.map(fi => {
+              const st = subtotalMap.get(fi.subtotalId);
+              if (!st) return null;
+              const bg = fi.sinal === "+"
+                ? (isOnDark ? "bg-emerald-400/25 text-emerald-200" : "bg-emerald-100 text-emerald-700")
+                : (isOnDark ? "bg-red-400/25 text-red-200" : "bg-red-100 text-red-700");
+              return (
+                <span key={fi.subtotalId} className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold ${bg}`}>
+                  {fi.sinal} {st.code}
+                </span>
+              );
+            })}
+          </span>
+        ))}
+        {totalItems === 0 && !acumulado && <span style={{ opacity: 0.4 }} className="text-xs italic">Fórmula vazia</span>}
       </div>
     );
   }
@@ -397,27 +426,55 @@ interface ItemModalProps {
   mode: "add" | "edit";
   item: Partial<IndicadorRow>;
   dreItems: DemoItem[];
-  subtotais: { id: string; code: string; nome: string }[];
+  subtotais: { id: string; code: string; nome: string; tipo: IndicadorTipo }[];
   onSave: (item: Partial<IndicadorRow>) => void;
   onClose: () => void;
 }
 
 function ItemModal({ mode, item, dreItems, subtotais, onSave, onClose }: ItemModalProps) {
-  const [form, setForm] = useState<Partial<IndicadorRow>>({ ...item, fontes: item.fontes ? [...item.fontes] : [] });
+  const initBlocos = getFormulaBlocos(item.formula);
+  const [form, setForm] = useState<Partial<IndicadorRow>>({
+    ...item,
+    fontes: item.fontes ? [...item.fontes] : [],
+    formula: initBlocos.length > 0 ? initBlocos : undefined,
+  });
   const [addingFonte, setAddingFonte] = useState<"DRE" | "DIRETO" | null>(null);
 
   function set<K extends keyof IndicadorRow>(key: K, val: IndicadorRow[K]) { setForm(f => ({ ...f, [key]: val })); }
 
-  function safeFormula(): FormulaItem[] { return Array.isArray(form.formula) ? form.formula : []; }
-
-  function toggleFormulaItem(id: string) {
-    const cur = safeFormula();
-    const exists = cur.find(f => f.subtotalId === id);
-    set("formula", exists ? cur.filter(f => f.subtotalId !== id) : [...cur, { subtotalId: id, sinal: "+" }]);
+  function changeTipo(t: IndicadorTipo) {
+    if (t === "SUBTOTAL") {
+      setForm(f => ({ id: f.id, nivel: f.nivel, nome: f.nome, tipo: t, formula: undefined, acumulado: false }));
+    } else {
+      setForm(f => ({ id: f.id, nivel: f.nivel, nome: f.nome, tipo: t, fontes: [] }));
+    }
   }
 
-  function toggleSinal(id: string) {
-    set("formula", safeFormula().map(f => f.subtotalId === id ? { ...f, sinal: f.sinal === "+" ? "-" as const : "+" as const } : f));
+  function getBlocos(): FormulaBloco[] { return getFormulaBlocos(form.formula); }
+
+  function setBlocos(blocos: FormulaBloco[]) { set("formula", blocos.length > 0 ? blocos : []); }
+
+  function addBloco() { setBlocos([...getBlocos(), newBloco()]); }
+
+  function removeBloco(id: string) { setBlocos(getBlocos().filter(b => b.id !== id)); }
+
+  function updateBloco(id: string, patch: Partial<FormulaBloco>) {
+    setBlocos(getBlocos().map(b => b.id === id ? { ...b, ...patch } : b));
+  }
+
+  function toggleBlocoItem(blocoId: string, subtotalId: string) {
+    setBlocos(getBlocos().map(b => {
+      if (b.id !== blocoId) return b;
+      const exists = b.items.find(fi => fi.subtotalId === subtotalId);
+      return { ...b, items: exists ? b.items.filter(fi => fi.subtotalId !== subtotalId) : [...b.items, { subtotalId, sinal: "+" }] };
+    }));
+  }
+
+  function toggleBlocoItemSinal(blocoId: string, subtotalId: string) {
+    setBlocos(getBlocos().map(b => {
+      if (b.id !== blocoId) return b;
+      return { ...b, items: b.items.map(fi => fi.subtotalId === subtotalId ? { ...fi, sinal: fi.sinal === "+" ? "-" as const : "+" as const } : fi) };
+    }));
   }
 
   function handleSave() {
@@ -441,21 +498,22 @@ function ItemModal({ mode, item, dreItems, subtotais, onSave, onClose }: ItemMod
 
         <div className="overflow-y-auto flex-1 p-5 space-y-4">
 
-          {/* Tipo toggle (só para add) */}
-          {mode === "add" && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Tipo</label>
-              <div className="flex gap-2">
-                {(["SUBTOTAL", "INDICADOR"] as IndicadorTipo[]).map(t => (
-                  <button key={t} type="button" onClick={() => set("tipo", t)}
-                    className="flex-1 py-2 text-sm font-medium rounded-lg border transition-all"
-                    style={tipo === t ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#374151", borderColor: "#d1d5db" }}>
-                    {t}
-                  </button>
-                ))}
-              </div>
+          {/* Tipo toggle */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Tipo</label>
+            <div className="flex gap-2">
+              {(["SUBTOTAL", "INDICADOR"] as IndicadorTipo[]).map(t => (
+                <button key={t} type="button" onClick={() => changeTipo(t)}
+                  className="flex-1 py-2 text-sm font-medium rounded-lg border transition-all"
+                  style={tipo === t ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#374151", borderColor: "#d1d5db" }}>
+                  {t}
+                </button>
+              ))}
             </div>
-          )}
+            {mode === "edit" && (
+              <p className="text-[11px] text-amber-600 mt-1.5">Alterar o tipo redefine os campos específicos do tipo anterior.</p>
+            )}
+          </div>
 
           {/* Nome */}
           <div>
@@ -475,61 +533,135 @@ function ItemModal({ mode, item, dreItems, subtotais, onSave, onClose }: ItemMod
                 <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide px-2">Composição</span>
                 <div className="flex-1 h-px bg-gray-200" />
               </div>
+
+              {/* Modo: Agregar filhos vs Fórmula personalizada */}
               <div className="flex gap-2">
                 <button type="button" onClick={() => set("formula", undefined)}
                   className="flex-1 py-2 text-xs font-medium rounded-lg border transition-all"
                   style={form.formula === undefined ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#374151", borderColor: "#d1d5db" }}>
                   Agregar filhos
                 </button>
-                <button type="button" onClick={() => { if (form.formula === undefined) set("formula", []); }}
+                <button type="button" onClick={() => { if (form.formula === undefined) setBlocos([newBloco()]); }}
                   className="flex-1 py-2 text-xs font-medium rounded-lg border transition-all"
                   style={form.formula !== undefined ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#374151", borderColor: "#d1d5db" }}>
                   Fórmula personalizada
                 </button>
               </div>
+
+              {/* Acumulado (disponível em ambos os modos) */}
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" checked={!!form.acumulado} onChange={e => set("acumulado", e.target.checked as unknown as boolean)}
+                  className="w-4 h-4" style={{ accentColor: "#1e3a5f" }} />
+                <span className="text-xs text-gray-700 font-medium">Acumular com período anterior da própria linha</span>
+              </label>
+
+              {/* Blocos de fórmula */}
               {form.formula !== undefined && (
-                <div className="rounded-lg border border-gray-200 overflow-hidden">
-                  <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
-                    <p className="text-xs text-gray-500">Selecione os subtotais e defina o sinal de cada um.</p>
-                  </div>
-                  {subtotais.length === 0 ? (
-                    <p className="px-3 py-4 text-xs text-gray-400 text-center">Nenhum outro subtotal disponível.</p>
-                  ) : (
-                    <div className="divide-y divide-gray-100 max-h-52 overflow-y-auto">
-                      {subtotais.map(s => {
-                        const fi = safeFormula().find(f => f.subtotalId === s.id);
-                        const included = !!fi;
-                        return (
-                          <div key={s.id} className={`flex items-center gap-3 px-3 py-2 transition-colors ${included ? "bg-blue-50" : "hover:bg-gray-50"}`}>
-                            <input type="checkbox" checked={included} onChange={() => toggleFormulaItem(s.id)}
-                              className="w-4 h-4 cursor-pointer flex-shrink-0" style={{ accentColor: "#1e3a5f" }} />
-                            {included ? (
-                              <button type="button" onClick={() => toggleSinal(s.id)}
-                                className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md font-bold text-sm border transition-colors"
-                                style={fi!.sinal === "+" ? { background: "#d1fae5", color: "#059669", borderColor: "#6ee7b7" } : { background: "#fee2e2", color: "#dc2626", borderColor: "#fca5a5" }}>
-                                {fi!.sinal}
-                              </button>
-                            ) : (
-                              <span className="flex-shrink-0 w-7 h-7 flex items-center justify-center text-gray-300 text-sm font-bold">+</span>
-                            )}
-                            <span className="font-mono text-xs text-blue-700 font-semibold flex-shrink-0 w-10">{s.code}</span>
-                            <span className="text-xs text-gray-700 truncate">{s.nome}</span>
-                          </div>
-                        );
-                      })}
+                <div className="space-y-3">
+                  {getBlocos().map((bloco, bi) => (
+                    <div key={bloco.id} className="rounded-lg border border-gray-200">
+                      {/* Cabeçalho do bloco */}
+                      <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200 rounded-t-lg">
+                        {/* Sinal do bloco */}
+                        <button type="button" onClick={() => updateBloco(bloco.id, { sinal: bloco.sinal === "+" ? "-" : "+" })}
+                          className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md font-bold text-sm border transition-colors"
+                          style={bloco.sinal === "+" ? { background: "#d1fae5", color: "#059669", borderColor: "#6ee7b7" } : { background: "#fee2e2", color: "#dc2626", borderColor: "#fca5a5" }}>
+                          {bloco.sinal}
+                        </button>
+                        {/* Label opcional */}
+                        <input
+                          className="flex-1 text-xs border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                          placeholder={`Bloco ${bi + 1} (rótulo opcional)`}
+                          value={bloco.label ?? ""}
+                          onChange={e => updateBloco(bloco.id, { label: e.target.value || undefined })} />
+                        {getBlocos().length > 1 && (
+                          <button type="button" onClick={() => removeBloco(bloco.id)}
+                            className="flex-shrink-0 p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors">
+                            <X size={13} />
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Lista de itens */}
+                      {subtotais.length === 0 ? (
+                        <p className="px-3 py-3 text-xs text-gray-400 text-center">Nenhum item disponível.</p>
+                      ) : (
+                        <div style={{ maxHeight: "240px", overflowY: "auto" }}>
+                          {(["SUBTOTAL", "INDICADOR"] as IndicadorTipo[]).map(grupo => {
+                            const grupo_items = subtotais.filter(s => s.tipo === grupo);
+                            if (grupo_items.length === 0) return null;
+                            return (
+                              <div key={grupo}>
+                                <div className="px-3 py-1 bg-gray-50 border-y border-gray-100 sticky top-0 z-10">
+                                  <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">{grupo}</span>
+                                </div>
+                                {grupo_items.map(s => {
+                                  const fi = bloco.items.find(f => f.subtotalId === s.id);
+                                  const included = !!fi;
+                                  return (
+                                    <div key={s.id} className={`flex items-center gap-3 px-3 py-2 border-b border-gray-50 transition-colors ${included ? "bg-blue-50" : "hover:bg-gray-50"}`}>
+                                      <input type="checkbox" checked={included} onChange={() => toggleBlocoItem(bloco.id, s.id)}
+                                        className="w-4 h-4 cursor-pointer flex-shrink-0" style={{ accentColor: "#1e3a5f" }} />
+                                      {included ? (
+                                        <button type="button" onClick={() => toggleBlocoItemSinal(bloco.id, s.id)}
+                                          className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md font-bold text-sm border transition-colors"
+                                          style={fi!.sinal === "+" ? { background: "#d1fae5", color: "#059669", borderColor: "#6ee7b7" } : { background: "#fee2e2", color: "#dc2626", borderColor: "#fca5a5" }}>
+                                          {fi!.sinal}
+                                        </button>
+                                      ) : (
+                                        <span className="flex-shrink-0 w-7 h-7 flex items-center justify-center text-gray-300 text-sm font-bold">+</span>
+                                      )}
+                                      <span className="font-mono text-xs text-blue-700 font-semibold flex-shrink-0 w-10">{s.code}</span>
+                                      <span className="text-xs text-gray-700 truncate">{s.nome}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Preview do bloco */}
+                      {bloco.items.length > 0 && (
+                        <div className="px-3 py-1.5 bg-gray-50 border-t border-gray-200 rounded-b-lg">
+                          <p className="text-[11px] text-gray-500 font-mono">
+                            {bloco.sinal === "-" ? "−" : ""} ({bloco.items.map((f, i) => {
+                              const st = subtotais.find(s => s.id === f.subtotalId);
+                              return `${i === 0 && f.sinal === "+" ? "" : f.sinal + " "}${st?.code ?? "?"}`;
+                            }).join(" ")})
+                          </p>
+                        </div>
+                      )}
                     </div>
-                  )}
-                  {safeFormula().length > 0 && (
-                    <div className="px-3 py-2 bg-gray-50 border-t border-gray-200">
-                      <p className="text-xs text-gray-500 font-mono">
-                        = {safeFormula().map((f, i) => {
-                          const st = subtotais.find(s => s.id === f.subtotalId);
-                          return `${i === 0 && f.sinal === "+" ? "" : f.sinal + " "}${st?.code ?? "?"}`;
+                  ))}
+
+                  {/* Botão adicionar bloco */}
+                  <button type="button" onClick={addBloco}
+                    className="w-full py-2 text-xs font-medium text-blue-600 border border-dashed border-blue-300 rounded-lg hover:bg-blue-50 transition-colors">
+                    + Adicionar bloco de fórmula
+                  </button>
+
+                  {/* Preview total */}
+                  {getBlocos().some(b => b.items.length > 0) && (
+                    <div className="px-3 py-2 rounded-lg bg-blue-50 border border-blue-100">
+                      <p className="text-[11px] text-blue-700 font-mono font-semibold">
+                        = {getBlocos().filter(b => b.items.length > 0).map((b, bi) => {
+                          const expr = b.items.map((f, i) => `${i === 0 && f.sinal === "+" ? "" : f.sinal + " "}${subtotais.find(s => s.id === f.subtotalId)?.code ?? "?"}`).join(" ");
+                          return `${bi > 0 || b.sinal === "-" ? b.sinal + " " : ""}(${expr})`;
                         }).join(" ")}
+                        {form.acumulado ? " + [período anterior]" : ""}
                       </p>
                     </div>
                   )}
                 </div>
+              )}
+
+              {/* Preview acumulado sem fórmula */}
+              {form.formula === undefined && form.acumulado && (
+                <p className="text-[11px] text-amber-600 bg-amber-50 rounded px-3 py-1.5 border border-amber-100">
+                  Valor = soma dos filhos + valor desta linha no período anterior
+                </p>
               )}
             </div>
           )}
@@ -625,9 +757,9 @@ export default function IndicadoresPage() {
   const codes = useMemo(() => computeCodes(data), [data]);
 
   const subtotalMap = useMemo(() => {
-    const m = new Map<string, { code: string; nome: string }>();
+    const m = new Map<string, { code: string; nome: string; tipo: IndicadorTipo }>();
     data.forEach((item, idx) => {
-      if (item.tipo === "SUBTOTAL") m.set(item.id, { code: codes[idx], nome: item.nome });
+      m.set(item.id, { code: codes[idx], nome: item.nome, tipo: item.tipo });
     });
     return m;
   }, [data, codes]);
@@ -636,7 +768,7 @@ export default function IndicadoresPage() {
     const editingId = modal?.item?.id;
     return data
       .map((item, idx) => ({ id: item.id, tipo: item.tipo, code: codes[idx], nome: item.nome }))
-      .filter(s => s.tipo === "SUBTOTAL" && s.id !== editingId);
+      .filter(s => s.id !== editingId);
   }, [data, codes, modal?.item?.id]);
 
   const visibleData = useMemo(() => {
@@ -692,11 +824,14 @@ export default function IndicadoresPage() {
       });
       setSelectedId(newItem.id);
     } else {
+      const novoTipo = item.tipo ?? "INDICADOR";
       setData(d => normalizeData(d).map(r => r.id === item.id
-        ? { ...r, nome: item.nome ?? r.nome,
-            ...(r.tipo === "INDICADOR"
-              ? { codigo: item.codigo, descricao: item.descricao, categoria: item.categoria, fontes: item.fontes ?? [] }
-              : { formula: item.formula })
+        ? { ...r,
+            nome: item.nome ?? r.nome,
+            tipo: novoTipo,
+            ...(novoTipo === "INDICADOR"
+              ? { codigo: item.codigo, descricao: item.descricao, categoria: item.categoria, fontes: item.fontes ?? [], formula: undefined }
+              : { formula: item.formula, codigo: undefined, descricao: undefined, categoria: undefined, fontes: undefined })
           }
         : r));
     }
@@ -787,7 +922,7 @@ export default function IndicadoresPage() {
   function clearDrag() { setDragIdx(null); setOverIdx(null); }
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader
         title="Indicadores"
         subtitle={`${stats.indicadores} indicadores · ${stats.subtotais} subtotais`}>
@@ -799,8 +934,8 @@ export default function IndicadoresPage() {
         </button>
       </PageHeader>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col flex-1 min-h-0">
 
           <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-wrap gap-3">
             <div>
@@ -823,7 +958,7 @@ export default function IndicadoresPage() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr style={{ background: "#1e3a5f" }}>
@@ -897,7 +1032,7 @@ export default function IndicadoresPage() {
 
                       <td className="px-3 py-2 text-xs">
                         {isSubtotal
-                          ? <ComposicaoChips childCodes={childCodes} totalDescendants={descendCount} isOnDark={isOnDark} formula={row.formula} subtotalMap={subtotalMap} />
+                          ? <ComposicaoChips childCodes={childCodes} totalDescendants={descendCount} isOnDark={isOnDark} formula={row.formula} acumulado={row.acumulado} subtotalMap={subtotalMap} />
                           : <FontesChips fontes={row.fontes} categoria={row.categoria} />}
                       </td>
 

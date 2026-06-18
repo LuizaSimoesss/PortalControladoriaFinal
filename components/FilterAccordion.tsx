@@ -1,20 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown, X, Search } from "lucide-react";
 
 export function FilterSection({
   label,
   count,
   onClear,
+  searchable,
   children,
 }: {
   label: string;
   count: number;
   onClear: () => void;
-  children: React.ReactNode;
+  searchable?: boolean;
+  children: React.ReactNode | ((search: string) => React.ReactNode);
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const content = typeof children === "function" ? children(search) : children;
+
   return (
     <div className="border-b border-gray-100 last:border-0">
       <div className="flex items-center px-5 py-3 hover:bg-gray-50 transition-colors">
@@ -28,7 +34,7 @@ export function FilterSection({
         </button>
         {count > 0 && (
           <button
-            onClick={(e) => { e.stopPropagation(); onClear(); }}
+            onClick={(e) => { e.stopPropagation(); onClear(); setSearch(""); }}
             className="text-xs text-gray-400 hover:text-red-500 transition-colors mr-2"
           >
             Limpar
@@ -38,7 +44,22 @@ export function FilterSection({
           <ChevronDown size={14} className={`text-gray-400 transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
         </button>
       </div>
-      {open && <div className="px-5 pb-3 space-y-0.5">{children}</div>}
+      {open && (
+        <div className="pb-3">
+          {searchable && (
+            <div className="relative px-5 mb-2">
+              <Search size={12} className="absolute left-8 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                className="w-full pl-7 pr-3 py-1.5 text-xs border border-gray-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                placeholder="Pesquisar..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+            </div>
+          )}
+          <div className="px-5 space-y-0.5">{content}</div>
+        </div>
+      )}
     </div>
   );
 }

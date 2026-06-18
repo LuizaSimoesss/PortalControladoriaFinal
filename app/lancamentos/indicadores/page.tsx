@@ -2,8 +2,9 @@
 
 import { useState, useMemo, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
-import { Plus, Trash2, Pencil, Search, Upload, X, AlertTriangle, ChevronLeft, ChevronRight, Download, Clock, FileText, Copy } from "lucide-react";
+import { Plus, Trash2, Pencil, Search, Upload, X, AlertTriangle, Download, Clock, FileText, Copy, Filter } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
+import { FilterSection, FilterCheckbox, FilterDrawerShell } from "@/components/FilterAccordion";
 import { usePersistedData, loadData } from "@/lib/storage";
 import type { LancamentoIndicador, IndicadorRow, UnidadeIndicador, ImportacaoIndicador } from "@/lib/mockData";
 
@@ -82,12 +83,42 @@ function parseData(v: string): string | null {
 
 function dataToPeriodo(data: string) { return data.slice(0, 7); }
 
+// ─── Hierarquia de indicadores ────────────────────────────────────────────────
+
+function buildIndicadorLabels(rows: IndicadorRow[]): Map<string, string> {
+  const labels = new Map<string, string>();
+  const path: Record<number, string> = {};
+  for (const row of rows) {
+    if (row.tipo === "SUBTOTAL") {
+      path[row.nivel] = row.nome;
+      // limpa níveis filhos ao entrar num novo subtotal
+      Object.keys(path).forEach(k => { if (Number(k) > row.nivel) delete path[Number(k)]; });
+    } else {
+      const parts = Object.entries(path)
+        .sort(([a], [b]) => Number(a) - Number(b))
+        .map(([, v]) => v);
+      const label = parts.length > 0 ? `${parts.join(" › ")} › ${row.nome}` : row.nome;
+      labels.set(row.codigo ?? row.id, label);
+    }
+  }
+  return labels;
+}
+
 // ─── Modal add/edit ───────────────────────────────────────────────────────────
 
-function LancamentoModal({ modo, tipo, form: initial, indRows, onSave, onClose }: {
+interface PoloRowL { id: string; POLO: string; ESTADO: string; CIDADE: string; DATA_CRIACAO: string; DATA_INATIVO: string; }
+interface ParceiroRowL { id: string; CODPARC: string; NOMEPARC: string; }
+interface ProjetoRowL { id: string; CODPROJ: string; IDENTIFICACAO: string; ANALITICO: boolean; }
+interface AdquiridaRowL { id: string; EMPRESA: string; DATA: string; ESTADO_ORIGEM: string; AREA_NEGOCIO: string; }
+
+function LancamentoModal({ modo, tipo, form: initial, indRows, poloData, parceiroData, projetoData, adquiridaData, onSave, onClose }: {
   modo: "add" | "edit"; tipo: Tipo;
   form: Partial<LancamentoIndicador>;
   indRows: IndicadorRow[];
+  poloData: PoloRowL[];
+  parceiroData: ParceiroRowL[];
+  projetoData: ProjetoRowL[];
+  adquiridaData: AdquiridaRowL[];
   onSave: (f: Omit<LancamentoIndicador, "id">) => void;
   onClose: () => void;
 }) {
@@ -103,7 +134,12 @@ function LancamentoModal({ modo, tipo, form: initial, indRows, onSave, onClose }
   const set = (k: keyof LancamentoIndicador, v: string | number) => setForm(f => ({ ...f, [k]: v }));
 
   const indLeaves = useMemo(() => indRows.filter(r => r.tipo === "INDICADOR"), [indRows]);
+  const hierLabels = useMemo(() => buildIndicadorLabels(indRows), [indRows]);
   const unidade = form.unidade ?? "valor";
+  const cidadesDisponiveis  = useMemo(() => Array.from(new Set(poloData.map(p => p.CIDADE).filter(Boolean))).sort(), [poloData]);
+  const parceirosDisponiveis = useMemo(() => [...parceiroData].sort((a, b) => a.CODPARC.localeCompare(b.CODPARC, undefined, { numeric: true, sensitivity: "base" })), [parceiroData]);
+  const projetosDisponiveis  = useMemo(() => projetoData.filter(p => p.ANALITICO).sort((a, b) => a.CODPROJ.localeCompare(b.CODPROJ, undefined, { numeric: true, sensitivity: "base" })), [projetoData]);
+  const adquiridasDisponiveis = useMemo(() => [...adquiridaData].sort((a, b) => a.EMPRESA.localeCompare(b.EMPRESA)), [adquiridaData]);
 
   function handleSave() {
     if (!form.data)          { alert("Informe a data.");      return; }
@@ -114,8 +150,13 @@ function LancamentoModal({ modo, tipo, form: initial, indRows, onSave, onClose }
     onSave({
       tipo, data, periodo: dataToPeriodo(data),
       cod_indicador: form.cod_indicador!,
-      unidade,
-      valor,
+      unidade, valor,
+      polo_cidade: form.polo_cidade || undefined,
+      parceiro:   form.parceiro   ? (form.parceiro.split(" — ")[0].trim() || undefined) : undefined,
+      projeto:    form.projeto    ? (form.projeto.split(" — ")[0].trim()  || undefined) : undefined,
+      cliente:    form.cliente    || undefined,
+      adquirida:  form.adquirida  || undefined,
+      comentario: form.comentario || undefined,
     });
   }
 
@@ -147,11 +188,14 @@ function LancamentoModal({ modo, tipo, form: initial, indRows, onSave, onClose }
               value={form.cod_indicador || ""}
               onChange={e => set("cod_indicador", e.target.value)}>
               <option value="">— Selecionar —</option>
-              {indLeaves.map(r => (
-                <option key={r.id} value={r.codigo ?? r.id}>
-                  {r.codigo ? `${r.codigo} — ` : ""}{r.nome}
-                </option>
-              ))}
+              {indLeaves.map(r => {
+                const key = r.codigo ?? r.id;
+                return (
+                  <option key={r.id} value={key}>
+                    {hierLabels.get(key) ?? r.nome}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -189,6 +233,64 @@ function LancamentoModal({ modo, tipo, form: initial, indRows, onSave, onClose }
               </span>
             </div>
           </div>
+
+          {/* Classificações */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Polo (Cidade)</label>
+              <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                value={form.polo_cidade ?? ""} onChange={e => setForm(f => ({ ...f, polo_cidade: e.target.value || undefined }))}>
+                <option value="">— Selecione —</option>
+                {cidadesDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Parceiro</label>
+              <input list="dl-parceiros"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={form.parceiro ?? ""}
+                onChange={e => setForm(f => ({ ...f, parceiro: e.target.value || undefined }))}
+                placeholder="Código ou nome..." />
+              <datalist id="dl-parceiros">
+                {parceirosDisponiveis.map(p => (
+                  <option key={p.id} value={`${p.CODPARC} — ${p.NOMEPARC}`} />
+                ))}
+              </datalist>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Projeto</label>
+              <input list="dl-projetos"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={form.projeto ?? ""}
+                onChange={e => setForm(f => ({ ...f, projeto: e.target.value || undefined }))}
+                placeholder="Código ou nome..." />
+              <datalist id="dl-projetos">
+                {projetosDisponiveis.map(p => (
+                  <option key={p.id} value={`${p.CODPROJ} — ${p.IDENTIFICACAO}`} />
+                ))}
+              </datalist>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Cliente</label>
+              <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={form.cliente ?? ""} onChange={e => setForm(f => ({ ...f, cliente: e.target.value || undefined }))}
+                placeholder="Nome do cliente" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Adquirida</label>
+              <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                value={form.adquirida ?? ""} onChange={e => setForm(f => ({ ...f, adquirida: e.target.value || undefined }))}>
+                <option value="">— Selecione —</option>
+                {adquiridasDisponiveis.map(a => <option key={a.id} value={a.EMPRESA}>{a.EMPRESA}</option>)}
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Comentário</label>
+            <textarea className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              rows={2} value={form.comentario ?? ""} onChange={e => setForm(f => ({ ...f, comentario: e.target.value || undefined }))}
+              placeholder="Observações..." />
+          </div>
         </div>
 
         <div className="flex justify-end gap-3 px-5 py-4 border-t border-gray-200 flex-shrink-0">
@@ -210,9 +312,13 @@ interface ImportRow {
   lancamento?: Omit<LancamentoIndicador, "id">;
 }
 
-function ImportModal({ tipo, periodo, indRows, onImport, onClose }: {
+function ImportModal({ tipo, periodo, indRows, poloData, parceiroData, projetoData, adquiridaData, onImport, onClose }: {
   tipo: Tipo; periodo: string;
   indRows: IndicadorRow[];
+  poloData: PoloRowL[];
+  parceiroData: ParceiroRowL[];
+  projetoData: ProjetoRowL[];
+  adquiridaData: AdquiridaRowL[];
   onImport: (rows: Omit<LancamentoIndicador, "id">[]) => void;
   onClose: () => void;
 }) {
@@ -267,10 +373,16 @@ function ImportModal({ tipo, periodo, indRows, onImport, onClose }: {
 
     if (erros.length > 0) return { raw, erros };
 
-    const dataISO = parseData(periodoRaw) ?? periodoValido! + "-01";
+    const dataISO    = parseData(periodoRaw) ?? periodoValido! + "-01";
+    const polo_cidade = (raw["POLO_CIDADE"]  || "").trim() || undefined;
+    const parceiro    = (raw["COD_PARCEIRO"] || "").trim() || undefined;
+    const projeto     = (raw["COD_PROJETO"]  || "").trim() || undefined;
+    const cliente     = (raw["CLIENTE"]      || "").trim() || undefined;
+    const adquirida   = (raw["ADQUIRIDA"]    || "").trim() || undefined;
+    const comentario  = (raw["COMENTARIO"]   || "").trim() || undefined;
     return {
       raw, erros: [],
-      lancamento: { tipo, data: dataISO, periodo: dataToPeriodo(dataISO), cod_indicador, unidade, valor: valor! },
+      lancamento: { tipo, data: dataISO, periodo: dataToPeriodo(dataISO), cod_indicador, unidade, valor: valor!, polo_cidade, parceiro, projeto, cliente, adquirida, comentario },
     };
   }
 
@@ -301,26 +413,68 @@ function ImportModal({ tipo, periodo, indRows, onImport, onClose }: {
 
   function baixarTemplate() {
     const wb = XLSX.utils.book_new();
-
-    // Aba 1: Template com linha de exemplo
+    const hierLabels = buildIndicadorLabels(indRows);
     const leaves = indRows.filter(r => r.tipo === "INDICADOR");
-    const exCod = leaves[0]?.codigo ?? leaves[0]?.id ?? "COD_EXEMPLO";
-    const wsT = XLSX.utils.aoa_to_sheet([
-      ["PERIODO", "COD_INDICADOR", "VALOR", "UNIDADE"],
-      ["01/2026", exCod, "1000,00", "valor"],
-    ]);
-    XLSX.utils.book_append_sheet(wb, wsT, "Template");
 
-    // Aba 2: Indicadores disponíveis (apenas folhas com código)
+    const exCod      = leaves[0]?.codigo ?? leaves[0]?.id ?? "COD_EXEMPLO";
+    const exCidade   = poloData[0]?.CIDADE ?? "";
+    const exParcCod  = parceiroData[0]?.CODPARC ?? "";
+    const exParcNome = parceiroData[0]?.NOMEPARC ?? "";
+    const exProj     = projetoData.find(p => p.ANALITICO);
+    const exProjCod  = exProj?.CODPROJ ?? "";
+    const exProjNome = exProj?.IDENTIFICACAO ?? "";
+
+    // Aba Template
+    const exAdquirida = adquiridaData[0]?.EMPRESA ?? "";
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ["PERIODO", "COD_INDICADOR", "VALOR", "UNIDADE", "POLO_CIDADE", "COD_PARCEIRO", "NOME_PARCEIRO", "COD_PROJETO", "NOME_PROJETO", "CLIENTE", "ADQUIRIDA", "COMENTARIO"],
+      ["01/2026", exCod, "1000,00", "valor", exCidade, exParcCod, exParcNome, exProjCod, exProjNome, "", exAdquirida, ""],
+    ]), "Template");
+
+    // Aba Adquiridas
+    if (adquiridaData.length > 0) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        [...adquiridaData].sort((a, b) => a.EMPRESA.localeCompare(b.EMPRESA))
+          .map(a => ({ ADQUIRIDA: a.EMPRESA }))
+      ), "Adquiridas");
+    }
+
+    // Aba Indicadores
     if (leaves.length > 0) {
-      const ws = XLSX.utils.json_to_sheet(
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
         leaves.map(r => ({
           COD_INDICADOR: r.codigo ?? r.id,
-          Nome: r.nome,
+          Nome: hierLabels.get(r.codigo ?? r.id) ?? r.nome,
           Categoria: r.categoria ?? "MENSAL",
         }))
-      );
-      XLSX.utils.book_append_sheet(wb, ws, "Indicadores");
+      ), "Indicadores");
+    }
+
+    // Aba Polos
+    const cidades = Array.from(new Set(poloData.map(p => p.CIDADE).filter(Boolean))).sort();
+    if (cidades.length > 0) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        cidades.map(c => ({ POLO_CIDADE: c }))
+      ), "Polos");
+    }
+
+    // Aba Parceiros
+    if (parceiroData.length > 0) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        [...parceiroData]
+          .sort((a, b) => a.CODPARC.localeCompare(b.CODPARC, undefined, { numeric: true, sensitivity: "base" }))
+          .map(p => ({ COD_PARCEIRO: p.CODPARC, NOME_PARCEIRO: p.NOMEPARC }))
+      ), "Parceiros");
+    }
+
+    // Aba Projetos
+    const projAnaliticos = projetoData
+      .filter(p => p.ANALITICO)
+      .sort((a, b) => a.CODPROJ.localeCompare(b.CODPROJ, undefined, { numeric: true, sensitivity: "base" }));
+    if (projAnaliticos.length > 0) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+        projAnaliticos.map(p => ({ COD_PROJETO: p.CODPROJ, NOME_PROJETO: p.IDENTIFICACAO }))
+      ), "Projetos");
     }
 
     XLSX.writeFile(wb, `Template_Lancamentos_Indicadores_${tipo}.xlsx`);
@@ -344,11 +498,11 @@ function ImportModal({ tipo, periodo, indRows, onImport, onClose }: {
           <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
             <p className="text-xs font-semibold text-gray-600 mb-2">Colunas esperadas:</p>
             <div className="flex flex-wrap gap-1.5">
-              {["PERIODO *", "COD_INDICADOR *", "VALOR *", "UNIDADE"].map(c => (
+              {["PERIODO *", "COD_INDICADOR *", "VALOR *", "UNIDADE", "POLO_CIDADE", "COD_PARCEIRO", "NOME_PARCEIRO", "COD_PROJETO", "NOME_PROJETO", "CLIENTE", "ADQUIRIDA", "COMENTARIO"].map(c => (
                 <span key={c} className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium ${c.endsWith("*") ? "bg-blue-100 text-blue-700" : "bg-gray-100 text-gray-500"}`}>{c}</span>
               ))}
             </div>
-            <p className="text-[11px] text-gray-400 mt-2">* Obrigatórias. UNIDADE aceita "%" ou "percentual" (padrão: valor).</p>
+            <p className="text-[11px] text-gray-400 mt-2">* Obrigatórias. UNIDADE aceita "%" ou "percentual" (padrão: valor). Parametrização usa COD_PARCEIRO e COD_PROJETO; NOME_* é ignorado na importação.</p>
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
@@ -393,7 +547,7 @@ function ImportModal({ tipo, periodo, indRows, onImport, onClose }: {
               {validas.length > 0 && (
                 <div className="text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 flex items-center gap-1.5">
                   <AlertTriangle size={12} className="text-amber-500 flex-shrink-0" />
-                  Os lançamentos de <strong>{periodoLabel(periodo)}</strong> — <strong>{tipo}</strong> serão substituídos.
+                  Os lançamentos de <strong>{tipo}</strong> nos períodos do arquivo serão substituídos.
                 </div>
               )}
             </div>
@@ -438,6 +592,7 @@ function BulkEditModal({ count, indRows, onSave, onClose }: {
   const [unidade,      setUnidade]      = useState<UnidadeIndicador>("valor");
   const [valorInput,   setValorInput]   = useState("");
   const indLeaves = useMemo(() => indRows.filter(r => r.tipo === "INDICADOR"), [indRows]);
+  const hierLabels = useMemo(() => buildIndicadorLabels(indRows), [indRows]);
 
   function handleSave() {
     const patch: Partial<Pick<LancamentoIndicador, "data" | "periodo" | "cod_indicador" | "unidade" | "valor">> = {};
@@ -489,11 +644,14 @@ function BulkEditModal({ count, indRows, onSave, onClose }: {
             <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
               value={codInd} onChange={e => setCodInd(e.target.value)}>
               <option value="">— Selecionar —</option>
-              {indLeaves.map(r => (
-                <option key={r.id} value={r.codigo ?? r.id}>
-                  {r.codigo ? `${r.codigo} — ` : ""}{r.nome}
-                </option>
-              ))}
+              {indLeaves.map(r => {
+                const key = r.codigo ?? r.id;
+                return (
+                  <option key={r.id} value={key}>
+                    {hierLabels.get(key) ?? r.nome}
+                  </option>
+                );
+              })}
             </select>
           </Field>
 
@@ -605,11 +763,8 @@ function HistoricoTab({ historico, lancamentos, onExcluir, onImportar }: {
 
 export default function LancamentosIndicadoresPage() {
   const { ano: anoHoje, mes: mesHoje } = hoje();
-  const [ano, setAno] = useState(anoHoje);
-  const [mes, setMes] = useState(mesHoje);
   const [tipo, setTipo] = useState<Tipo>("realizado");
   const [search, setSearch] = useState("");
-  const [verTodos, setVerTodos] = useState(false);
 
   const [aba, setAba] = useState<Aba>("lancamentos");
   const [data, setData] = usePersistedData<LancamentoIndicador[]>("portal_lancamentos_indicadores", []);
@@ -617,40 +772,92 @@ export default function LancamentosIndicadoresPage() {
   const [modal, setModal] = useState<{ open: boolean; modo: "add" | "edit"; form: Partial<LancamentoIndicador> } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
+
+  const periodoHoje = periodoStr(anoHoje, mesHoje);
+  interface Filtros { polo: string[]; parceiro: string[]; projeto: string[]; unidade: string[]; adquirida: string[]; indicador: string[]; periodoDE: string; periodoATE: string; }
+  const filtrosVazios: Filtros = { polo: [], parceiro: [], projeto: [], unidade: [], adquirida: [], indicador: [], periodoDE: periodoHoje, periodoATE: periodoHoje };
+  const [filtros, setFiltros] = usePersistedData<Filtros>("portal_filtros_lanc_indicadores", filtrosVazios);
+  const [rascunho, setRascunho] = useState<Filtros>(filtrosVazios);
+
+  const nfiltros: Filtros = {
+    polo:       Array.isArray(filtros.polo)       ? filtros.polo       : [],
+    parceiro:   Array.isArray(filtros.parceiro)   ? filtros.parceiro   : [],
+    projeto:    Array.isArray(filtros.projeto)    ? filtros.projeto    : [],
+    unidade:    Array.isArray(filtros.unidade)    ? filtros.unidade    : [],
+    adquirida:  Array.isArray(filtros.adquirida)  ? filtros.adquirida  : [],
+    indicador:  Array.isArray(filtros.indicador)  ? filtros.indicador  : [],
+    periodoDE:  typeof filtros.periodoDE  === "string" ? filtros.periodoDE  : periodoHoje,
+    periodoATE: typeof filtros.periodoATE === "string" ? filtros.periodoATE : periodoHoje,
+  };
+  const filtrosAtivos = !!(nfiltros.polo.length || nfiltros.parceiro.length || nfiltros.projeto.length || nfiltros.unidade.length || nfiltros.adquirida.length || nfiltros.indicador.length);
 
   // multi-select
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastClickIdx = useRef<number | null>(null);
 
   const indRows = useMemo(() => loadData<IndicadorRow[]>("portal_indicadores", []), []);
-  const periodo = periodoStr(ano, mes);
+  const [poloData] = usePersistedData<PoloRowL[]>("portal_polo", []);
+  const [parceiroData] = usePersistedData<ParceiroRowL[]>("portal_parceiro", []);
+  const [projetoData] = usePersistedData<ProjetoRowL[]>("portal_projetos", []);
+  const [adquiridaData] = usePersistedData<AdquiridaRowL[]>("portal_adquiridas", []);
+
+  const periodo = periodoHoje;
 
   const indMap = useMemo(() => new Map(
     indRows.filter(r => r.tipo === "INDICADOR").map(r => [r.codigo ?? r.id, r.nome])
   ), [indRows]);
 
+  const parceiroMap = useMemo(() => new Map(parceiroData.map(p => [p.CODPARC, p.NOMEPARC])), [parceiroData]);
+  const projetoMap  = useMemo(() => new Map(projetoData.map(p => [p.CODPROJ, p.IDENTIFICACAO])), [projetoData]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return data.filter(r => {
       if (r.tipo !== tipo) return false;
-      if (!verTodos && r.periodo !== periodo) return false;
+      if (nfiltros.periodoDE  && r.periodo < nfiltros.periodoDE)  return false;
+      if (nfiltros.periodoATE && r.periodo > nfiltros.periodoATE) return false;
+      if (nfiltros.indicador.length  && !nfiltros.indicador.includes(r.cod_indicador))   return false;
+      if (nfiltros.polo.length      && !nfiltros.polo.includes(r.polo_cidade ?? ""))    return false;
+      if (nfiltros.parceiro.length  && !nfiltros.parceiro.includes(r.parceiro ?? ""))   return false;
+      if (nfiltros.projeto.length   && !nfiltros.projeto.includes(r.projeto ?? ""))     return false;
+      if (nfiltros.unidade.length   && !nfiltros.unidade.includes(r.unidade))           return false;
+      if (nfiltros.adquirida.length && !nfiltros.adquirida.includes(r.adquirida ?? "")) return false;
       if (!q) return true;
       return (
         r.cod_indicador.toLowerCase().includes(q) ||
-        (indMap.get(r.cod_indicador) || "").toLowerCase().includes(q)
+        (indMap.get(r.cod_indicador) || "").toLowerCase().includes(q) ||
+        (r.parceiro || "").toLowerCase().includes(q) ||
+        (parceiroMap.get(r.parceiro ?? "") || "").toLowerCase().includes(q) ||
+        (r.projeto || "").toLowerCase().includes(q) ||
+        (projetoMap.get(r.projeto ?? "") || "").toLowerCase().includes(q) ||
+        (r.cliente || "").toLowerCase().includes(q)
       );
     });
-  }, [data, tipo, periodo, search, indMap, verTodos]);
+  }, [data, tipo, search, indMap, filtros, parceiroMap, projetoMap]);
 
   // Clear selection when filters change
-  useEffect(() => { setSelected(new Set()); lastClickIdx.current = null; }, [tipo, periodo, verTodos]);
+  const filtrosKey = JSON.stringify(filtros);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { setSelected(new Set()); lastClickIdx.current = null; }, [tipo, filtrosKey]);
 
-  function navMes(delta: number) {
-    let m = mes + delta, a = ano;
-    if (m > 12) { m = 1;  a++; }
-    if (m < 1)  { m = 12; a--; }
-    setMes(m); setAno(a);
+  const optsPolos       = useMemo(() => Array.from(new Set(data.map(r => r.polo_cidade).filter(Boolean) as string[])).sort(), [data]);
+  const optsParceiros   = useMemo(() => Array.from(new Set(data.map(r => r.parceiro).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })), [data]);
+  const optsProjetos    = useMemo(() => Array.from(new Set(data.map(r => r.projeto).filter(Boolean) as string[])).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })), [data]);
+  const optsAdquiridas  = useMemo(() => Array.from(new Set(data.map(r => r.adquirida).filter(Boolean) as string[])).sort(), [data]);
+  const hierLabelsPage  = useMemo(() => buildIndicadorLabels(indRows), [indRows]);
+  const optsIndicadores = useMemo(() => Array.from(new Set(data.filter(r => r.tipo === tipo).map(r => r.cod_indicador))).sort((a, b) => {
+    const la = hierLabelsPage.get(a) ?? a;
+    const lb = hierLabelsPage.get(b) ?? b;
+    return la.localeCompare(lb, "pt-BR");
+  }), [data, tipo, hierLabelsPage]);
+
+  function openFilter() {
+    setRascunho({ ...nfiltros });
+    setFilterOpen(true);
   }
+  function applyFilter() { setFiltros({ ...rascunho }); setFilterOpen(false); }
+  function clearFilter() { setRascunho(filtrosVazios); }
 
   function handleSave(f: Omit<LancamentoIndicador, "id">) {
     if (modal?.modo === "add") {
@@ -663,9 +870,11 @@ export default function LancamentosIndicadoresPage() {
 
   function handleImport(rows: Omit<LancamentoIndicador, "id">[]) {
     const importacaoId = `imp_${Date.now()}`;
-    setHistorico(h => [...h, { id: importacaoId, tipo, periodo, criadoEm: new Date().toISOString(), totalLinhas: rows.length }]);
+    const periodosImport = new Set(rows.map(r => r.periodo));
+    const periodoRef = rows[0]?.periodo ?? periodo;
+    setHistorico(h => [...h, { id: importacaoId, tipo, periodo: periodoRef, criadoEm: new Date().toISOString(), totalLinhas: rows.length }]);
     setData(d => {
-      const sem   = d.filter(r => !(r.tipo === tipo && r.periodo === periodo));
+      const sem   = d.filter(r => !(r.tipo === tipo && periodosImport.has(r.periodo)));
       const novos = rows.map(r => ({ ...r, importacaoId, id: `li_${Date.now()}_${Math.random().toString(36).slice(2)}` }));
       return [...sem, ...novos];
     });
@@ -745,7 +954,7 @@ export default function LancamentosIndicadoresPage() {
       <PageHeader
         title="Lançamentos de Indicadores"
         subtitle={aba === "lancamentos"
-          ? `${filtered.length} lançamento${filtered.length !== 1 ? "s" : ""}${verTodos ? "" : ` · ${periodoLabel(periodo)}`}`
+          ? `${filtered.length} lançamento${filtered.length !== 1 ? "s" : ""}`
           : `${historico.length} importação${historico.length !== 1 ? "ões" : ""}`}>
         <button onClick={() => setImportOpen(true)}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
@@ -801,21 +1010,19 @@ export default function LancamentosIndicadoresPage() {
                 ))}
               </div>
 
-              {!verTodos && (
-                <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-2 bg-white">
-                  <button onClick={() => navMes(-1)} className="p-0.5 hover:text-blue-600 transition-colors"><ChevronLeft size={15} /></button>
-                  <span className="text-sm font-semibold text-gray-700 w-24 text-center">{periodoLabel(periodo)}</span>
-                  <button onClick={() => navMes(1)} className="p-0.5 hover:text-blue-600 transition-colors"><ChevronRight size={15} /></button>
-                </div>
-              )}
+              <span className="text-sm font-semibold text-gray-600 px-1">
+                {!nfiltros.periodoDE && !nfiltros.periodoATE
+                  ? "Todos os períodos"
+                  : nfiltros.periodoDE === nfiltros.periodoATE && nfiltros.periodoDE
+                  ? periodoLabel(nfiltros.periodoDE)
+                  : `${nfiltros.periodoDE ? periodoLabel(nfiltros.periodoDE) : "início"} – ${nfiltros.periodoATE ? periodoLabel(nfiltros.periodoATE) : "atual"}`}
+              </span>
 
-              <button
-                onClick={() => setVerTodos(v => !v)}
-                className="px-3 py-2 text-sm font-medium border rounded-lg transition-colors"
-                style={verTodos
-                  ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" }
-                  : { background: "white", color: "#374151", borderColor: "#e5e7eb" }}>
-                Ver todos os períodos
+              <button onClick={openFilter}
+                className="relative flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg border transition-colors"
+                style={filtrosAtivos ? { background: "#1e3a5f", color: "white", borderColor: "#1e3a5f" } : { background: "white", color: "#374151", borderColor: "#d1d5db" }}>
+                <Filter size={14} /> Filtros
+                {filtrosAtivos && <span className="w-1.5 h-1.5 rounded-full bg-white absolute top-1 right-1" />}
               </button>
 
               <div className="relative ml-auto">
@@ -855,7 +1062,7 @@ export default function LancamentosIndicadoresPage() {
 
             {/* ── Tabela ── */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-              <div className="overflow-x-auto">
+              <div className="overflow-auto" style={{ maxHeight: "calc(100vh - 280px)" }}>
                 <table className="w-full text-sm">
                   <thead>
                     <tr style={{ background: "#f8fafc" }}>
@@ -869,11 +1076,15 @@ export default function LancamentosIndicadoresPage() {
                           className="w-4 h-4 rounded cursor-pointer"
                           style={{ accentColor: "#1e3a5f" }} />
                       </th>
-                      {verTodos && (
-                        <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-24">Período</th>
-                      )}
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-24">Período</th>
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-28">Data</th>
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left">Indicador</th>
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-28">Polo</th>
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-32">Parceiro</th>
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-32">Projeto</th>
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-32">Cliente</th>
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-32">Adquirida</th>
+                      <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-left w-40">Comentário</th>
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-right w-36">Valor</th>
                       <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2.5 text-center w-20">Ações</th>
                     </tr>
@@ -896,11 +1107,9 @@ export default function LancamentosIndicadoresPage() {
                               style={{ accentColor: "#1e3a5f" }}
                               title="Shift+clique para selecionar intervalo" />
                           </td>
-                          {verTodos && (
-                            <td className="px-4 py-2 text-xs text-gray-500 tabular-nums whitespace-nowrap">
+                          <td className="px-4 py-2 text-xs text-gray-500 tabular-nums whitespace-nowrap">
                               {periodoLabel(row.periodo)}
                             </td>
-                          )}
                           <td className="px-4 py-2 text-xs text-gray-600 tabular-nums whitespace-nowrap">
                             {row.data
                               ? new Date(row.data + "T00:00:00").toLocaleDateString("pt-BR")
@@ -912,6 +1121,16 @@ export default function LancamentosIndicadoresPage() {
                               <span className="text-xs text-gray-500 ml-1.5">{indMap.get(row.cod_indicador)}</span>
                             )}
                           </td>
+                          <td className="px-4 py-2 text-xs text-gray-500 whitespace-nowrap">{row.polo_cidade || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-2 text-xs text-gray-500 whitespace-nowrap">
+                            {row.parceiro ? <><span className="font-mono text-blue-700 font-semibold">{row.parceiro}</span>{parceiroMap.get(row.parceiro) && <span className="ml-1 text-gray-400">{parceiroMap.get(row.parceiro)}</span>}</> : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2 text-xs text-gray-500 whitespace-nowrap">
+                            {row.projeto ? <><span className="font-mono text-blue-700 font-semibold">{row.projeto}</span>{projetoMap.get(row.projeto) && <span className="ml-1 text-gray-400">{projetoMap.get(row.projeto)}</span>}</> : <span className="text-gray-300">—</span>}
+                          </td>
+                          <td className="px-4 py-2 text-xs text-gray-500 whitespace-nowrap">{row.cliente || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-2 text-xs text-gray-500 whitespace-nowrap">{row.adquirida || <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-2 text-xs text-gray-500 max-w-[160px] truncate" title={row.comentario}>{row.comentario || <span className="text-gray-300">—</span>}</td>
                           <td className="px-4 py-2 text-right whitespace-nowrap">
                             <span className={`text-sm font-semibold tabular-nums ${row.valor < 0 ? "text-red-600" : "text-gray-800"}`}>
                               {row.unidade === "percentual"
@@ -947,10 +1166,8 @@ export default function LancamentosIndicadoresPage() {
                     })}
                     {filtered.length === 0 && (
                       <tr>
-                        <td colSpan={verTodos ? 6 : 5} className="px-4 py-10 text-center text-gray-400 text-sm">
-                          {verTodos
-                            ? `Nenhum lançamento de ${tipo === "realizado" ? "Realizado" : "Orçado"}.`
-                            : `Nenhum lançamento para ${periodoLabel(periodo)} — ${tipo === "realizado" ? "Realizado" : "Orçado"}.`}
+                        <td colSpan={12} className="px-4 py-10 text-center text-gray-400 text-sm">
+                          {`Nenhum lançamento de ${tipo === "realizado" ? "Realizado" : "Orçado"} para o período selecionado.`}
                         </td>
                       </tr>
                     )}
@@ -958,7 +1175,7 @@ export default function LancamentosIndicadoresPage() {
                   {filtered.length > 0 && (
                     <tfoot>
                       <tr style={{ background: "#f8fafc" }}>
-                        <td colSpan={verTodos ? 3 : 2} className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase">
+                        <td colSpan={9} className="px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase">
                           {selected.size > 0 ? `${selected.size} selecionado${selected.size !== 1 ? "s" : ""}` : "Total"}
                         </td>
                         <td className="px-4 py-2.5 text-left text-xs text-gray-500 uppercase font-semibold">
@@ -984,6 +1201,7 @@ export default function LancamentosIndicadoresPage() {
         <LancamentoModal
           modo={modal.modo} tipo={tipo} form={modal.form}
           indRows={indRows}
+          poloData={poloData} parceiroData={parceiroData} projetoData={projetoData} adquiridaData={adquiridaData}
           onSave={handleSave} onClose={() => setModal(null)} />
       )}
 
@@ -991,6 +1209,7 @@ export default function LancamentosIndicadoresPage() {
         <ImportModal
           tipo={tipo} periodo={periodo}
           indRows={indRows}
+          poloData={poloData} parceiroData={parceiroData} projetoData={projetoData} adquiridaData={adquiridaData}
           onImport={handleImport} onClose={() => setImportOpen(false)} />
       )}
 
@@ -1000,6 +1219,124 @@ export default function LancamentosIndicadoresPage() {
           indRows={indRows}
           onSave={handleBulkSave}
           onClose={() => setBulkEditOpen(false)} />
+      )}
+
+      {filterOpen && (
+        <FilterDrawerShell
+          totalAtivos={nfiltros.indicador.length + nfiltros.polo.length + nfiltros.parceiro.length + nfiltros.projeto.length + nfiltros.unidade.length + nfiltros.adquirida.length}
+          onClose={() => setFilterOpen(false)} onApply={applyFilter} onClear={clearFilter}>
+
+          {/* ── Período ── */}
+          <FilterSection
+            label="Período"
+            count={0}
+            onClear={() => setRascunho(p => ({ ...p, periodoDE: periodoHoje, periodoATE: periodoHoje }))}>
+            <div className="px-1 space-y-3">
+              <div>
+                <p className="text-xs text-gray-400 mb-1">De</p>
+                <input type="month"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                  value={rascunho.periodoDE}
+                  onChange={e => setRascunho(p => ({ ...p, periodoDE: e.target.value }))} />
+              </div>
+              <div>
+                <p className="text-xs text-gray-400 mb-1">Até</p>
+                <input type="month"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                  value={rascunho.periodoATE}
+                  onChange={e => setRascunho(p => ({ ...p, periodoATE: e.target.value }))} />
+              </div>
+              <button
+                onClick={() => setRascunho(p => ({ ...p, periodoDE: "", periodoATE: "" }))}
+                className="text-xs text-gray-400 hover:text-blue-600 transition-colors">
+                Limpar datas (ver todos os períodos)
+              </button>
+            </div>
+          </FilterSection>
+
+          {/* ── Indicador ── */}
+          <FilterSection label="Indicador" count={rascunho.indicador.length} onClear={() => setRascunho(p => ({ ...p, indicador: [] }))} searchable>
+            {(srch) => {
+              const opts = optsIndicadores.filter(v => {
+                if (!srch) return true;
+                const label = hierLabelsPage.get(v) ?? v;
+                return label.toLowerCase().includes(srch.toLowerCase()) || v.toLowerCase().includes(srch.toLowerCase());
+              });
+              return <>
+                {opts.map(v => (
+                  <FilterCheckbox key={v} label={hierLabelsPage.get(v) ?? v} checked={rascunho.indicador.includes(v)}
+                    onChange={() => setRascunho(p => ({ ...p, indicador: p.indicador.includes(v) ? p.indicador.filter(x => x !== v) : [...p.indicador, v] }))} />
+                ))}
+                {opts.length === 0 && <p className="text-xs text-gray-400 px-1">Nenhum resultado.</p>}
+              </>;
+            }}
+          </FilterSection>
+
+          {/* ── Polo ── */}
+          <FilterSection label="Polo" count={rascunho.polo.length} onClear={() => setRascunho(p => ({ ...p, polo: [] }))} searchable>
+            {(srch) => {
+              const opts = optsPolos.filter(v => !srch || v.toLowerCase().includes(srch.toLowerCase()));
+              return <>
+                {opts.map(v => (
+                  <FilterCheckbox key={v} label={v} checked={rascunho.polo.includes(v)}
+                    onChange={() => setRascunho(p => ({ ...p, polo: p.polo.includes(v) ? p.polo.filter(x => x !== v) : [...p.polo, v] }))} />
+                ))}
+                {opts.length === 0 && <p className="text-xs text-gray-400 px-1">Nenhum resultado.</p>}
+              </>;
+            }}
+          </FilterSection>
+
+          {/* ── Parceiro ── */}
+          <FilterSection label="Parceiro" count={rascunho.parceiro.length} onClear={() => setRascunho(p => ({ ...p, parceiro: [] }))} searchable>
+            {(srch) => {
+              const opts = optsParceiros.filter(v => !srch || v.toLowerCase().includes(srch.toLowerCase()) || (parceiroMap.get(v) || "").toLowerCase().includes(srch.toLowerCase()));
+              return <>
+                {opts.map(v => (
+                  <FilterCheckbox key={v} label={`${v}${parceiroMap.get(v) ? ` — ${parceiroMap.get(v)}` : ""}`} checked={rascunho.parceiro.includes(v)}
+                    onChange={() => setRascunho(p => ({ ...p, parceiro: p.parceiro.includes(v) ? p.parceiro.filter(x => x !== v) : [...p.parceiro, v] }))} />
+                ))}
+                {opts.length === 0 && <p className="text-xs text-gray-400 px-1">Nenhum resultado.</p>}
+              </>;
+            }}
+          </FilterSection>
+
+          {/* ── Projeto ── */}
+          <FilterSection label="Projeto" count={rascunho.projeto.length} onClear={() => setRascunho(p => ({ ...p, projeto: [] }))} searchable>
+            {(srch) => {
+              const opts = optsProjetos.filter(v => !srch || v.toLowerCase().includes(srch.toLowerCase()) || (projetoMap.get(v) || "").toLowerCase().includes(srch.toLowerCase()));
+              return <>
+                {opts.map(v => (
+                  <FilterCheckbox key={v} label={`${v}${projetoMap.get(v) ? ` — ${projetoMap.get(v)}` : ""}`} checked={rascunho.projeto.includes(v)}
+                    onChange={() => setRascunho(p => ({ ...p, projeto: p.projeto.includes(v) ? p.projeto.filter(x => x !== v) : [...p.projeto, v] }))} />
+                ))}
+                {opts.length === 0 && <p className="text-xs text-gray-400 px-1">Nenhum resultado.</p>}
+              </>;
+            }}
+          </FilterSection>
+
+          {/* ── Unidade ── */}
+          <FilterSection label="Unidade" count={rascunho.unidade.length} onClear={() => setRascunho(p => ({ ...p, unidade: [] }))}>
+            {[{ v: "valor", l: "Valor (R$)" }, { v: "percentual", l: "Percentual (%)" }].map(({ v, l }) => (
+              <FilterCheckbox key={v} label={l} checked={rascunho.unidade.includes(v)}
+                onChange={() => setRascunho(p => ({ ...p, unidade: p.unidade.includes(v) ? p.unidade.filter(x => x !== v) : [...p.unidade, v] }))} />
+            ))}
+          </FilterSection>
+
+          {/* ── Adquirida ── */}
+          <FilterSection label="Adquirida" count={rascunho.adquirida.length} onClear={() => setRascunho(p => ({ ...p, adquirida: [] }))} searchable>
+            {(srch) => {
+              const opts = optsAdquiridas.filter(v => !srch || v.toLowerCase().includes(srch.toLowerCase()));
+              return <>
+                {opts.map(v => (
+                  <FilterCheckbox key={v} label={v} checked={rascunho.adquirida.includes(v)}
+                    onChange={() => setRascunho(p => ({ ...p, adquirida: p.adquirida.includes(v) ? p.adquirida.filter(x => x !== v) : [...p.adquirida, v] }))} />
+                ))}
+                {opts.length === 0 && <p className="text-xs text-gray-400 px-1">Nenhum resultado.</p>}
+              </>;
+            }}
+          </FilterSection>
+
+        </FilterDrawerShell>
       )}
     </div>
   );

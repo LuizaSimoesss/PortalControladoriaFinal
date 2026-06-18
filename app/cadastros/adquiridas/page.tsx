@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { Plus, Pencil, Trash2, Search, X, Filter } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, X, Filter, ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { adquiridasDataInicial, type AdquiridaRow } from "@/lib/mockData";
 import { usePersistedData } from "@/lib/storage";
@@ -27,6 +27,13 @@ export default function AdquiridasPage() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchFields, setBatchFields] = useState<Set<string>>(new Set());
   const [batchValues, setBatchValues] = useState({ ESTADO_ORIGEM: "", AREA_NEGOCIO: "" });
+  const [sortCol, setSortCol] = useState<keyof AdquiridaRow>("DATA");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  function toggleSort(col: keyof AdquiridaRow) {
+    if (sortCol === col) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortCol(col); setSortDir("asc"); }
+  }
 
   const nfiltros = {
     estado: Array.isArray(filtros.estado) ? filtros.estado : [],
@@ -40,14 +47,21 @@ export default function AdquiridasPage() {
       estado: Array.isArray(filtros.estado) ? filtros.estado : [],
       area: Array.isArray(filtros.area) ? filtros.area : [],
     };
-    const sorted = [...data].sort((a, b) => a.EMPRESA.localeCompare(b.EMPRESA, "pt-BR"));
+    const sorted = [...data].sort((a, b) => {
+      const av = a[sortCol] ?? "";
+      const bv = b[sortCol] ?? "";
+      const cmp = sortCol === "DATA"
+        ? av.localeCompare(bv)
+        : av.localeCompare(bv, "pt-BR");
+      return sortDir === "asc" ? cmp : -cmp;
+    });
     return sorted.filter((r) => {
       if (search) { const q = search.toLowerCase(); if (!r.EMPRESA.toLowerCase().includes(q) && !r.ESTADO_ORIGEM.toLowerCase().includes(q) && !r.AREA_NEGOCIO.toLowerCase().includes(q)) return false; }
       if (nf.estado.length && !nf.estado.includes(r.ESTADO_ORIGEM)) return false;
       if (nf.area.length && !nf.area.includes(r.AREA_NEGOCIO)) return false;
       return true;
     });
-  }, [data, search, filtros]);
+  }, [data, search, filtros, sortCol, sortDir]);
 
   const allSelected = filtered.length > 0 && filtered.every(r => selected.has(r.id));
 
@@ -115,7 +129,7 @@ export default function AdquiridasPage() {
   }
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader title="Adquiridas" subtitle={`${data.length} empresas adquiridas`}>
         <button className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg" style={{ background: "#1e3a5f" }}
           onClick={() => setModal({ open: true, mode: "add", row: { ...empty } })}>
@@ -123,8 +137,8 @@ export default function AdquiridasPage() {
         </button>
       </PageHeader>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col flex-1 min-h-0">
           <div className="flex items-center gap-2 p-4 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -140,33 +154,44 @@ export default function AdquiridasPage() {
             <span className="text-xs text-gray-400 ml-auto">{filtered.length} de {data.length} registros</span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: "#f8fafc" }}>
+                  <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-center w-10">#</th>
                   <th className="px-3 py-2 w-8">
                     <input type="checkbox" checked={allSelected} onChange={toggleAll}
                       className="w-4 h-4 cursor-pointer rounded" style={{ accentColor: "#1e3a5f" }} />
                   </th>
-                  <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-left">EMPRESA</th>
-                  <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-left">DATA DE AQUISIÇÃO</th>
-                  <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-left">ESTADO DE ORIGEM</th>
-                  <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-left">ÁREA DE NEGÓCIO</th>
+                  {(["EMPRESA", "DATA", "ESTADO_ORIGEM", "AREA_NEGOCIO"] as const).map((col, i) => {
+                    const labels: Record<string, string> = { EMPRESA: "EMPRESA", DATA: "DATA DE AQUISIÇÃO", ESTADO_ORIGEM: "ESTADO DE ORIGEM", AREA_NEGOCIO: "ÁREA DE NEGÓCIO" };
+                    const active = sortCol === col;
+                    const Icon = active ? (sortDir === "asc" ? ChevronUp : ChevronDown) : ChevronsUpDown;
+                    return (
+                      <th key={col} className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-left">
+                        <button onClick={() => toggleSort(col)} className="flex items-center gap-1 hover:text-gray-700 transition-colors">
+                          {labels[col]}
+                          <Icon size={13} className={active ? "text-blue-600" : "text-gray-400"} />
+                        </button>
+                      </th>
+                    );
+                  })}
                   <th className="font-semibold text-gray-500 uppercase text-xs tracking-wide px-4 py-2 text-center">AÇÕES</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((row) => {
+                {filtered.map((row, idx) => {
                   const isSel = selected.has(row.id);
                   return (
                     <tr key={row.id} className="border-b border-gray-100 transition-colors select-none"
                       style={isSel ? { background: "#eff6ff", outline: "2px solid #0078D4", outlineOffset: "-1px" } : {}}>
+                      <td className="px-4 py-1.5 text-center text-xs text-gray-400 tabular-nums">{idx + 1}</td>
                       <td className="px-3 py-1.5 w-8" onClick={(e) => { e.stopPropagation(); handleSelect(row.id, e.shiftKey); }}>
                         <input type="checkbox" checked={isSel} onChange={() => {}}
                           className="w-4 h-4 cursor-pointer rounded" style={{ accentColor: "#1e3a5f" }} />
                       </td>
                       <td className="px-4 py-1.5 text-sm font-medium text-gray-800">{row.EMPRESA}</td>
-                      <td className="px-4 py-1.5 text-sm text-gray-500">{row.DATA ? new Date(row.DATA).toLocaleDateString("pt-BR") : "—"}</td>
+                      <td className="px-4 py-1.5 text-sm text-gray-500">{row.DATA ? new Date(row.DATA + "T00:00:00").toLocaleDateString("pt-BR") : "—"}</td>
                       <td className="px-4 py-1.5 text-sm">
                         <span className="inline-flex px-2 py-0.5 rounded text-xs font-medium" style={{ background: "#f0f9ff", color: "#0369a1" }}>{row.ESTADO_ORIGEM}</span>
                       </td>
@@ -181,7 +206,7 @@ export default function AdquiridasPage() {
                   );
                 })}
                 {filtered.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-400">Nenhuma empresa adquirida encontrada.</td></tr>
+                  <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-400">Nenhuma empresa adquirida encontrada.</td></tr>
                 )}
               </tbody>
             </table>

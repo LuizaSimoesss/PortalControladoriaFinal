@@ -1,10 +1,11 @@
-"use client";
+﻿"use client";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import { ChevronDown, ChevronRight as ChevronRt, Filter, Download } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { usePersistedData, loadData } from "@/lib/storage";
+import { buildHierarchy } from "@/lib/utils";
 import { idbGet } from "@/lib/idb";
 import type { LancamentoFinanceiro, Fechamento, NaturezaRow, CentroResultadoRow, EmpresaRow, ParceiroRow, ProjetoRow } from "@/lib/mockData";
 
@@ -31,10 +32,11 @@ interface Filtros {
   periodoFim:    string;  // "YYYY-MM"
   viewMode:      ViewMode;
   mostrarZeros:  boolean;
+  crIds:         string[];
 }
 
 const _y = new Date().getFullYear();
-const filtrosVazios: Filtros = { periodoInicio: `${_y}-01`, periodoFim: `${_y}-12`, viewMode: "mensal", mostrarZeros: false };
+const filtrosVazios: Filtros = { periodoInicio: `${_y}-01`, periodoFim: `${_y}-12`, viewMode: "mensal", mostrarZeros: false, crIds: [] };
 
 // ─── Grupos de período ────────────────────────────────────────────────────────
 
@@ -96,9 +98,11 @@ function matchesRegra(cod: string, r: RegraItem | undefined): boolean {
   if (!r || r.modo === "none") return true;
   if (r.modo === "especifico") return r.codEspecifico ? cod === r.codEspecifico : true;
   if (r.modo === "multiplo") return r.codMultiplos ? r.codMultiplos.includes(cod) : true;
-  const cmp = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-  if (r.codDe && cmp(cod, r.codDe) < 0) return false;
-  if (r.codAte && cmp(cod, r.codAte) > 0) return false;
+  // intervalo: compara numericamente se possível, lexicograficamente senão
+  const n = +cod;
+  const isNum = !isNaN(n);
+  if (r.codDe)  { const d = +r.codDe;  if (isNum && !isNaN(d) ? n < d : cod < r.codDe)  return false; }
+  if (r.codAte) { const a = +r.codAte; if (isNum && !isNaN(a) ? n > a : cod > r.codAte) return false; }
   return true;
 }
 
@@ -147,6 +151,24 @@ function computePeriod(dre: DemoItem[], lans: LancamentoFinanceiro[]): PeriodRes
 
 const EMPTY_PERIOD: PeriodResult = { valores: new Map(), naoAlocado: 0 };
 
+// Retorna os lançamentos que NÃO foram capturados por nenhuma regra CONTA da DRE
+function computeUnallocated(dre: DemoItem[], lans: LancamentoFinanceiro[]): LancamentoFinanceiro[] {
+  const alocados = new Set<number>();
+  for (const item of dre) {
+    if (item.tipo !== "CONTA") continue;
+    const hasNat = hasEffectiveRule(item.regras?.natureza);
+    const hasCr  = hasEffectiveRule(item.regras?.centroResultado);
+    if (!hasNat && !hasCr) continue;
+    for (let i = 0; i < lans.length; i++) {
+      const l = lans[i];
+      if ((!hasNat || matchesRegra(l.codnat, item.regras?.natureza)) &&
+          (!hasCr  || matchesRegra(l.codcencus, item.regras?.centroResultado)))
+        alocados.add(i);
+    }
+  }
+  return lans.filter((_, i) => !alocados.has(i));
+}
+
 function aggregatePeriods(meses: number[], monthly: PeriodResult[], dre: DemoItem[]): PeriodResult {
   const valores = new Map<string, number>();
   for (const item of dre) {
@@ -165,7 +187,8 @@ function getRowStyle(tipo: string, nivel: number) {
 }
 
 function fmtInt(v: number) {
-  return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  const s = Math.abs(v).toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  return v < 0 ? `(${s})` : s;
 }
 
 function fmtDate(d: string) {
@@ -226,7 +249,7 @@ const dreInicial: DemoItem[] = [
 // ─── Página ───────────────────────────────────────────────────────────────────
 
 export default function DreRealizadaPage() {
-  const [dre]        = usePersistedData<DemoItem[]>("portal_dre", dreInicial);
+  const [dre]        = usePersistedData<DemoItem[]>("portal_dre", []);
   const [fechamentos] = usePersistedData<Fechamento[]>("portal_fechamentos", []);
 
   const [lancamentos, setLancamentos] = useState<LancamentoFinanceiro[]>([]);
@@ -234,6 +257,8 @@ export default function DreRealizadaPage() {
 
   const [fechamentoId, setFechamentoId] = useState<string>("__ativo__");
   const [collapsed,    setCollapsed]    = useState<Set<string>>(new Set());
+  const [activeLevel,  setActiveLevel]  = useState<number | "all">(1);
+  const initialCollapseRef = useRef(false);
 
   const [filterOpen, setFilterOpen] = useState(false);
   const [filtros,    setFiltros]    = usePersistedData<Filtros>("portal_dre_filtros_realizada", filtrosVazios);
@@ -242,16 +267,78 @@ export default function DreRealizadaPage() {
   const [detalhe, setDetalhe] = useState<{ item: DemoItem; lans: LancamentoFinanceiro[] } | null>(null);
   const [periodosSel, setPeriodosSel] = useState<Set<string>>(new Set());
 
+  const [diagNufin, setDiagNufin] = useState("");
+  const [diagResultado, setDiagResultado] = useState<{ motivo: string; detalhe: string; tipo: "ok" | "erro" | "aviso" } | null>(null);
+
+  type SortKey = "nufin" | "data" | "historico" | "codnat" | "codcencus" | "codemp" | "codproj" | "codparc" | "valor";
+  const [sortKey, setSortKey] = useState<SortKey>("data");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
   const natMap  = useMemo(() => new Map(loadData<NaturezaRow[]>("portal_natureza", []).map(r => [r.CODNAT, r.DESCRNAT])), []);
   const crMap   = useMemo(() => new Map(loadData<CentroResultadoRow[]>("portal_centro_resultado", []).map(r => [r.CODCENCUS, r.DESCRCENCUS])), []);
+
+  const crOpcoes = useMemo(() =>
+    loadData<CentroResultadoRow[]>("portal_centro_resultado", [])
+      .filter(r => r.GRAU === 1 && r.ATIVO && (r.ENTRA_RESULTADO === "DRE" || r.ENTRA_RESULTADO === "AMBOS"))
+      .sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" })),
+  []);
+
+  const crFiltroSet = useMemo(() => {
+    const ids = filtros.crIds ?? [];
+    if (ids.length === 0) return null;
+    const allCrs = loadData<CentroResultadoRow[]>("portal_centro_resultado", [])
+      .sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" }));
+    const crMap = new Map(allCrs.map(cr => [cr.CODCENCUS, cr]));
+    const hasPaiData = allCrs.some(cr => !!cr.CODCENCUSPAI);
+    const result = new Set<string>();
+    if (hasPaiData) {
+      // CODCENCUSPAI disponível: sobe a cadeia de pais até encontrar o GRAU=1
+      for (const cr of allCrs) {
+        let cur: typeof cr | undefined = cr;
+        while (cur && cur.GRAU > 1 && cur.CODCENCUSPAI) cur = crMap.get(cur.CODCENCUSPAI);
+        if (cur && ids.includes(cur.CODCENCUS)) result.add(cr.CODCENCUS);
+      }
+    } else {
+      // Fallback: buildHierarchy por ordem de CODCENCUS (funciona quando pais ordenam antes dos filhos)
+      const withHierarchy = buildHierarchy(allCrs, "DESCRCENCUS");
+      const selectedDescrs = new Set(
+        allCrs.filter(cr => ids.includes(cr.CODCENCUS)).map(cr => cr.DESCRCENCUS)
+      );
+      for (const cr of withHierarchy) {
+        const grau1 = cr.GRAU_1 as string | undefined;
+        if (ids.includes(cr.CODCENCUS) || (grau1 && selectedDescrs.has(grau1)))
+          result.add(cr.CODCENCUS);
+      }
+    }
+    return result;
+  }, [filtros.crIds]);
+
+  // Códigos que NÃO devem entrar na DRE conforme cadastro
+  const crExcluidos  = useMemo(() => new Set(
+    loadData<CentroResultadoRow[]>("portal_centro_resultado", [])
+      .filter(r => r.ENTRA_RESULTADO !== "DRE" && r.ENTRA_RESULTADO !== "AMBOS")
+      .map(r => r.CODCENCUS)
+  ), []);
+  const natExcluidas = useMemo(() => new Set(
+    loadData<NaturezaRow[]>("portal_natureza", [])
+      .filter(r => r.ENTRA_RESULTADO !== "DRE" && r.ENTRA_RESULTADO !== "AMBOS")
+      .map(r => r.CODNAT)
+  ), []);
+  const empExcluidas = useMemo(() => new Set(
+    loadData<EmpresaRow[]>("portal_empresas", [])
+      .filter(r => r.ENTRA_RESULTADO !== "DRE" && r.ENTRA_RESULTADO !== "AMBOS")
+      .map(r => r.CODEMP)
+  ), []);
   const empMap  = useMemo(() => new Map(loadData<EmpresaRow[]>("portal_empresas", []).map(r => [r.CODEMP, r.RAZAOSOCIAL])), []);
   const parcMap = useMemo(() => new Map(loadData<ParceiroRow[]>("portal_parceiro", []).map(r => [r.CODPARC, r.NOMEPARC])), []);
   const projMap = useMemo(() => new Map(loadData<ProjetoRow[]>("portal_projetos", []).map(r => [r.CODPROJ, r.IDENTIFICACAO])), []);
 
-  // Inicializa seleção de períodos ao abrir um item
+  // Inicializa seleção de períodos e reset de sort ao abrir um item
   useEffect(() => {
     if (!detalhe) return;
     setPeriodosSel(new Set(detalhe.lans.map(l => l.periodo)));
+    setSortKey("data");
+    setSortDir("asc");
   }, [detalhe?.item.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const detalhePeriodos = useMemo(() =>
@@ -277,6 +364,32 @@ export default function DreRealizadaPage() {
     detalheGrupos.reduce((s, g) => s + g.lans.reduce((ss, l) => ss + l.valor, 0), 0),
     [detalheGrupos]
   );
+
+  const detalheLansOrdenados = useMemo(() => {
+    const flat = detalheGrupos.flatMap(g => g.lans);
+    return [...flat].sort((a, b) => {
+      let av: string | number, bv: string | number;
+      switch (sortKey) {
+        case "nufin":     av = a.nufin    ?? ""; bv = b.nufin    ?? ""; break;
+        case "data":      av = a.data;           bv = b.data;           break;
+        case "historico": av = a.historico ?? ""; bv = b.historico ?? ""; break;
+        case "codnat":    av = a.codnat;          bv = b.codnat;          break;
+        case "codcencus": av = a.codcencus;       bv = b.codcencus;       break;
+        case "codemp":    av = a.codemp;          bv = b.codemp;          break;
+        case "codproj":   av = a.codproj ?? "";   bv = b.codproj ?? "";   break;
+        case "codparc":   av = a.codparc ?? "";   bv = b.codparc ?? "";   break;
+        case "valor":     av = a.valor;           bv = b.valor;           break;
+        default:          return 0;
+      }
+      const cmp = typeof av === "number" ? av - (bv as number) : (av as string).localeCompare(bv as string);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [detalheGrupos, sortKey, sortDir]);
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("asc"); }
+  }
 
   function exportarDetalhe() {
     if (!detalhe) return;
@@ -347,9 +460,13 @@ export default function DreRealizadaPage() {
     return lancamentos.filter(l => {
       if (l.tipo !== "realizado") return false;
       if (fechamentoVisual && l.fechamentoId !== fechamentoVisual.id) return false;
+      if (crExcluidos.has(l.codcencus)) return false;
+      if (natExcluidas.has(l.codnat)) return false;
+      if (empExcluidas.has(l.codemp)) return false;
+      if (crFiltroSet && (!l.codcencus || !crFiltroSet.has(l.codcencus))) return false;
       return true;
     });
-  }, [lancamentos, dataLoaded, fechamentoVisual]);
+  }, [lancamentos, dataLoaded, fechamentoVisual, crExcluidos, natExcluidas, empExcluidas, crFiltroSet]);
 
   const lancamentosPeriodo = useMemo(() => {
     const { periodoInicio, periodoFim } = filtros;
@@ -405,6 +522,32 @@ export default function DreRealizadaPage() {
 
   const codes = useMemo(() => computeCodes(dre), [dre]);
 
+  // Lançamentos que não foram capturados por nenhuma regra da DRE no período filtrado
+  const naoAlocados = useMemo(
+    () => computeUnallocated(dre, lancamentosPeriodo),
+    [dre, lancamentosPeriodo]
+  );
+  const totalNaoAlocado = useMemo(
+    () => naoAlocados.reduce((s, l) => s + l.valor, 0),
+    [naoAlocados]
+  );
+
+  // Lançamentos excluídos intencionalmente por configuração de ENTRA_RESULTADO no período filtrado
+  const lancamentosExcluidos = useMemo(() => {
+    if (!dataLoaded) return [];
+    const { periodoInicio, periodoFim } = filtros;
+    return lancamentos.filter(l => {
+      if (l.tipo !== "realizado") return false;
+      if (fechamentoVisual && l.fechamentoId !== fechamentoVisual.id) return false;
+      if (l.periodo < periodoInicio || l.periodo > periodoFim) return false;
+      return crExcluidos.has(l.codcencus) || natExcluidas.has(l.codnat) || empExcluidas.has(l.codemp);
+    });
+  }, [lancamentos, dataLoaded, fechamentoVisual, crExcluidos, natExcluidas, empExcluidas, filtros]);
+  const totalExcluidos = useMemo(
+    () => lancamentosExcluidos.reduce((s, l) => s + l.valor, 0),
+    [lancamentosExcluidos]
+  );
+
   const visibleData = useMemo(() => {
     const hidden = new Set<string>();
     dre.forEach((item, idx) => {
@@ -432,15 +575,93 @@ export default function DreRealizadaPage() {
     const ano = filtros.periodoInicio.slice(0, 4);
     if (filtros.periodoInicio !== `${ano}-01` || filtros.periodoFim !== `${ano}-12`) n++;
     if (filtros.mostrarZeros) n++;
+    if ((filtros.crIds?.length ?? 0) > 0) n++;
     return n;
   }, [filtros]);
 
+  // Colapsa tudo ao N1 na primeira vez que `dre` tiver dados
+  useEffect(() => {
+    if (initialCollapseRef.current || dre.length === 0) return;
+    initialCollapseRef.current = true;
+    setCollapsed(new Set(dre.filter(d => d.tipo === "SUBTOTAL").map(d => d.id)));
+  }, [dre]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const maxNivel = useMemo(
+    () => Math.max(...dre.filter(d => d.tipo === "SUBTOTAL").map(d => d.nivel), 1),
+    [dre]
+  );
+
+  function handleSetLevel(nivel: number | "all") {
+    setActiveLevel(nivel);
+    if (nivel === "all") {
+      setCollapsed(new Set());
+    } else {
+      setCollapsed(new Set(
+        dre.filter(d => d.tipo === "SUBTOTAL" && d.nivel >= nivel).map(d => d.id)
+      ));
+    }
+  }
+
   function toggleCollapse(id: string) {
+    setActiveLevel("all"); // desativa destaque de nível ao expandir/colapsar manualmente
     setCollapsed(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   }
 
   function aplicar()    { setFiltros(rascunho); setFilterOpen(false); }
   function limparTudo() { setRascunho(filtrosVazios); }
+
+  function diagnosticarNufin(nufin: string) {
+    const q = nufin.trim();
+    if (!q) return;
+    const lan = lancamentos.find(l => (l.nufin ?? "") === q);
+    if (!lan) {
+      setDiagResultado({ tipo: "erro", motivo: "Não encontrado", detalhe: `Nenhum lançamento com NUFIN ${q} nos dados importados.` });
+      return;
+    }
+    if (lan.tipo !== "realizado") {
+      setDiagResultado({ tipo: "aviso", motivo: "Tipo incorreto", detalhe: `O lançamento é do tipo "${lan.tipo}", não "realizado". A DRE Realizada só considera lançamentos do tipo realizado.` });
+      return;
+    }
+    if (fechamentoVisual && lan.fechamentoId !== fechamentoVisual.id) {
+      const fech = fechamentos.find(f => f.id === lan.fechamentoId);
+      setDiagResultado({ tipo: "aviso", motivo: "Fechamento diferente", detalhe: `O lançamento pertence ao fechamento "${fech?.label ?? lan.fechamentoId}", mas a DRE está exibindo "${fechamentoVisual.label}". Troque o fechamento no seletor acima.` });
+      return;
+    }
+    const { periodoInicio, periodoFim } = filtros;
+    if (lan.periodo < periodoInicio || lan.periodo > periodoFim) {
+      setDiagResultado({ tipo: "aviso", motivo: "Período fora do filtro", detalhe: `O lançamento é do período ${lan.periodo}, mas o filtro atual cobre ${periodoInicio} até ${periodoFim}. Ajuste o filtro de período.` });
+      return;
+    }
+    if (crExcluidos.has(lan.codcencus)) {
+      const cr = loadData<CentroResultadoRow[]>("portal_centro_resultado", []).find(r => r.CODCENCUS === lan.codcencus);
+      setDiagResultado({ tipo: "aviso", motivo: "CR excluído por configuração", detalhe: `Centro de Resultado ${lan.codcencus} (${cr?.DESCRCENCUS ?? ""}) está configurado como "${cr?.ENTRA_RESULTADO ?? "NÃO ENTRA"}" em Cadastro › Centro de Resultado.` });
+      return;
+    }
+    if (natExcluidas.has(lan.codnat)) {
+      const nat = loadData<NaturezaRow[]>("portal_natureza", []).find(r => r.CODNAT === lan.codnat);
+      setDiagResultado({ tipo: "aviso", motivo: "Natureza excluída por configuração", detalhe: `Natureza ${lan.codnat} (${nat?.DESCRNAT ?? ""}) está configurada como "${nat?.ENTRA_RESULTADO ?? "NÃO ENTRA"}" em Cadastro › Natureza.` });
+      return;
+    }
+    if (empExcluidas.has(lan.codemp)) {
+      const emp = loadData<EmpresaRow[]>("portal_empresas", []).find(r => r.CODEMP === lan.codemp);
+      setDiagResultado({ tipo: "aviso", motivo: "Empresa excluída por configuração", detalhe: `Empresa ${lan.codemp} (${emp?.RAZAOSOCIAL ?? ""}) está configurada como "${emp?.ENTRA_RESULTADO ?? "NÃO ENTRA"}" em Cadastro › Empresas.` });
+      return;
+    }
+    // Verifica se alguma regra CONTA da DRE cobre este lançamento
+    const contasCobrem = dre.filter(item => {
+      if (item.tipo !== "CONTA") return false;
+      const hasNat = hasEffectiveRule(item.regras?.natureza);
+      const hasCr  = hasEffectiveRule(item.regras?.centroResultado);
+      if (!hasNat && !hasCr) return false;
+      return (!hasNat || matchesRegra(lan.codnat, item.regras?.natureza)) &&
+             (!hasCr  || matchesRegra(lan.codcencus, item.regras?.centroResultado));
+    });
+    if (contasCobrem.length === 0) {
+      setDiagResultado({ tipo: "erro", motivo: "Sem regra na DRE", detalhe: `Nenhuma conta da estrutura DRE tem regra que cubra Natureza ${lan.codnat} + CR ${lan.codcencus}. Ajuste a estrutura em Cadastro › Demonstrativos.` });
+    } else {
+      setDiagResultado({ tipo: "ok", motivo: "Alocado", detalhe: `O lançamento está alocado em: ${contasCobrem.map(c => c.descricao).join(", ")}.` });
+    }
+  }
 
   const anoAtivo = filtros.periodoInicio.slice(0, 4);
   const lancamentosDoAno = lancamentosBase.filter(l => l.periodo.startsWith(anoAtivo)).length;
@@ -487,7 +708,7 @@ export default function DreRealizadaPage() {
     <div>
       <PageHeader title="Demonstração de Resultado do Exercício" subtitle={subtitle} />
 
-      <div className="p-6 space-y-4">
+      <div className="p-6 space-y-4 min-w-max">
 
         {/* ── Controles ──────────────────────────────────────────────────────── */}
         <div className="flex items-center gap-3 flex-wrap">
@@ -514,10 +735,67 @@ export default function DreRealizadaPage() {
             )}
           </button>
 
+          {/* Diagnóstico por NUFIN */}
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              placeholder="NUFIN…"
+              value={diagNufin}
+              onChange={e => { setDiagNufin(e.target.value); setDiagResultado(null); }}
+              onKeyDown={e => e.key === "Enter" && diagnosticarNufin(diagNufin)}
+              className="w-28 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            />
+            <button
+              onClick={() => diagnosticarNufin(diagNufin)}
+              className="px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors text-gray-600">
+              🔍
+            </button>
+          </div>
+
+          {/* Níveis */}
+          <div className="flex items-center rounded-lg border border-gray-200 overflow-hidden">
+            {Array.from({ length: maxNivel }, (_, i) => i + 1).map(n => (
+              <button key={n} onClick={() => handleSetLevel(n)}
+                className="px-3 py-2 text-xs font-semibold transition-colors"
+                style={activeLevel === n
+                  ? { background: "#1e3a5f", color: "white" }
+                  : { background: "white", color: "#374151" }}>
+                N{n}
+              </button>
+            ))}
+            <button onClick={() => handleSetLevel("all")}
+              className="px-3 py-2 text-xs font-semibold transition-colors border-l border-gray-200"
+              style={activeLevel === "all"
+                ? { background: "#1e3a5f", color: "white" }
+                : { background: "white", color: "#374151" }}>
+              Tudo
+            </button>
+          </div>
+
           <span className="ml-auto text-xs text-gray-400">
             {lancamentosDoAno.toLocaleString("pt-BR")} lançamentos · {VIEW_LABELS[viewMode]} · {periodoLabel}
           </span>
         </div>
+
+        {/* ── Resultado do diagnóstico ──────────────────────────────────────── */}
+        {diagResultado && (
+          <div className="flex items-start gap-3 px-4 py-3 rounded-lg border text-sm"
+            style={
+              diagResultado.tipo === "ok"    ? { background: "#f0fdf4", borderColor: "#bbf7d0", color: "#166534" } :
+              diagResultado.tipo === "erro"  ? { background: "#fef2f2", borderColor: "#fecaca", color: "#991b1b" } :
+                                               { background: "#fffbeb", borderColor: "#fde68a", color: "#92400e" }
+            }>
+            <span className="text-base leading-none mt-0.5">
+              {diagResultado.tipo === "ok" ? "✅" : diagResultado.tipo === "erro" ? "❌" : "⚠️"}
+            </span>
+            <div>
+              <p className="font-semibold">{diagResultado.motivo}</p>
+              <p className="mt-0.5 text-[13px] opacity-90">{diagResultado.detalhe}</p>
+            </div>
+            <button onClick={() => setDiagResultado(null)}
+              className="ml-auto text-current opacity-40 hover:opacity-70 transition-opacity leading-none text-base">✕</button>
+          </div>
+        )}
 
         {/* ── Tabela pivô ─────────────────────────────────────────────────────── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -529,7 +807,7 @@ export default function DreRealizadaPage() {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="text-sm border-collapse" style={{ minWidth: "max-content", width: "100%" }}>
+            <table className="text-sm" style={{ minWidth: "max-content", width: "100%", borderCollapse: "separate", borderSpacing: 0 }}>
               <thead>
                 {/* Linha de agrupamento — apenas no modo trimestral */}
                 {viewMode === "trimestral" && (
@@ -541,7 +819,7 @@ export default function DreRealizadaPage() {
                         {c.label}
                       </th>
                     ))}
-                    <th className="border-l border-white/10" style={{ background: "#152d4a" }} />
+                    <th className="border-l border-white/10 sticky right-0 z-30" style={{ background: "#152d4a" }} />
                   </tr>
                 )}
 
@@ -562,7 +840,7 @@ export default function DreRealizadaPage() {
                       </th>
                     );
                   })}
-                  <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap min-w-[140px] border-l border-white/20"
+                  <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap min-w-[140px] border-l border-white/20 sticky right-0 z-30"
                     style={{ background: "#1e3a5f" }}>
                     Total
                   </th>
@@ -592,7 +870,7 @@ export default function DreRealizadaPage() {
                               {isCollapsed ? <ChevronRt size={13} /> : <ChevronDown size={13} />}
                             </button>
                           ) : <span className="w-4 flex-shrink-0" />}
-                          <span className="whitespace-nowrap">{item.descricao}</span>
+                          <span className={`whitespace-nowrap${isSubtotal ? " uppercase" : ""}`}>{item.descricao}</span>
                         </span>
                       </td>
 
@@ -604,23 +882,22 @@ export default function DreRealizadaPage() {
                           <td key={ci}
                             className={`px-3 py-2.5 text-right tabular-nums whitespace-nowrap${sep ? " border-l border-gray-100" : ""}`}>
                             {v !== 0
-                              ? <span className={v < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtInt(v)}</span>
+                              ? <span>{fmtInt(v)}</span>
                               : <span style={{ opacity: 0.18 }}>—</span>}
                           </td>
                         );
                       })}
 
                       {/* Total */}
-                      <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap border-l border-gray-100"
-                        style={{ fontWeight: isSubtotal ? "700" : "500" }}>
-                        <span className={total < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtInt(total)}</span>
+                      <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap border-l border-gray-100 sticky right-0 z-10"
+                        style={{ fontWeight: isSubtotal ? "700" : "500", background: s.bg }}>
+                        <span>{fmtInt(total)}</span>
                       </td>
                     </tr>
                   );
                 })}
 
-
-                {visibleData.length === 0 && valoresTotal.naoAlocado === 0 && (
+                {visibleData.length === 0 && (
                   <tr>
                     <td colSpan={2 + colunas.length} className="px-4 py-12 text-center text-gray-400 text-sm">
                       Nenhuma linha com valor.{" "}
@@ -696,7 +973,7 @@ export default function DreRealizadaPage() {
                   </div>
                   <div className="text-right">
                     <p className="text-[10px] text-gray-400 uppercase tracking-wide">Total</p>
-                    <p className={`text-sm font-bold tabular-nums${detalheTotal < 0 ? " text-red-600" : " text-gray-800"}`}>
+                    <p className="text-sm font-bold tabular-nums text-gray-800">
                       {fmtInt(detalheTotal)}
                     </p>
                   </div>
@@ -713,57 +990,75 @@ export default function DreRealizadaPage() {
                 <table className="text-sm w-full border-collapse">
                   <thead className="sticky top-0">
                     <tr style={{ background: "#1e3a5f" }}>
-                      {["NUFIN","Data","Histórico","Natureza","Centro de Resultado","Empresa","Projeto","Parceiro","Valor"].map((h, i) => (
-                        <th key={i}
-                          className={`px-3 py-2.5 text-white/80 text-xs uppercase tracking-wide font-semibold whitespace-nowrap${i === 8 ? " text-right" : " text-left"}`}>
-                          {h}
-                        </th>
-                      ))}
+                      {(
+                        [
+                          ["nufin",    "NUFIN",               false],
+                          ["data",     "Data",                false],
+                          ["historico","Histórico",           false],
+                          ["codnat",   "Natureza",            false],
+                          ["codcencus","Centro de Resultado", false],
+                          ["codemp",   "Empresa",             false],
+                          ["codproj",  "Projeto",             false],
+                          ["codparc",  "Parceiro",            false],
+                          ["valor",    "Valor",               true ],
+                        ] as [SortKey, string, boolean][]
+                      ).map(([key, label, right]) => {
+                        const active = sortKey === key;
+                        return (
+                          <th key={key}
+                            onClick={() => toggleSort(key)}
+                            className={`px-3 py-2.5 text-xs uppercase tracking-wide font-semibold whitespace-nowrap cursor-pointer select-none transition-colors hover:bg-white/10${right ? " text-right" : " text-left"}`}
+                            style={{ color: active ? "white" : "rgba(255,255,255,0.7)" }}>
+                            <span className="inline-flex items-center gap-1">
+                              {label}
+                              <span className="text-[10px]" style={{ opacity: active ? 1 : 0.35 }}>
+                                {active ? (sortDir === "asc" ? "↑" : "↓") : "↕"}
+                              </span>
+                            </span>
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
-                    {detalheGrupos.length === 0 && (
+                    {detalheLansOrdenados.length === 0 && (
                       <tr>
                         <td colSpan={9} className="px-4 py-10 text-center text-gray-400 text-sm">
                           Nenhum lançamento para os períodos selecionados.
                         </td>
                       </tr>
                     )}
-                    {detalheGrupos.map(g => (
-                      <React.Fragment key={g.periodo}>
-                        {g.lans.map((l, i) => (
-                          <tr key={`${g.periodo}-${i}`} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{l.nufin ?? "—"}</td>
-                            <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{fmtDate(l.data)}</td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{l.historico ?? <span className="text-gray-300">—</span>}</td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.codnat}</span>
-                              {natMap.get(l.codnat) ?? ""}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.codcencus}</span>
-                              {crMap.get(l.codcencus) ?? ""}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.codemp}</span>
-                              {empMap.get(l.codemp) ?? ""}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              {l.codproj
-                                ? <><span className="text-gray-400 text-xs mr-1">{l.codproj}</span>{projMap.get(l.codproj) ?? ""}</>
-                                : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              {l.codparc
-                                ? <><span className="text-gray-400 text-xs mr-1">{l.codparc}</span>{parcMap.get(l.codparc) ?? ""}</>
-                                : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className={`px-3 py-1.5 text-right tabular-nums whitespace-nowrap font-medium${l.valor < 0 ? " text-red-600" : " text-gray-800"}`}>
-                              {fmtInt(l.valor)}
-                            </td>
-                          </tr>
-                        ))}
-                      </React.Fragment>
+                    {detalheLansOrdenados.map((l, i) => (
+                      <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{l.nufin ?? "—"}</td>
+                        <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{fmtDate(l.data)}</td>
+                        <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">{l.historico ?? <span className="text-gray-300">—</span>}</td>
+                        <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                          <span className="text-gray-400 text-xs mr-1">{l.codnat}</span>
+                          {natMap.get(l.codnat) ?? ""}
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                          <span className="text-gray-400 text-xs mr-1">{l.codcencus}</span>
+                          {crMap.get(l.codcencus) ?? ""}
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                          <span className="text-gray-400 text-xs mr-1">{l.codemp}</span>
+                          {empMap.get(l.codemp) ?? ""}
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                          {l.codproj
+                            ? <><span className="text-gray-400 text-xs mr-1">{l.codproj}</span>{projMap.get(l.codproj) ?? ""}</>
+                            : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
+                          {l.codparc
+                            ? <><span className="text-gray-400 text-xs mr-1">{l.codparc}</span>{parcMap.get(l.codparc) ?? ""}</>
+                            : <span className="text-gray-300">—</span>}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap font-medium text-gray-800">
+                          {fmtInt(l.valor)}
+                        </td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
@@ -843,6 +1138,40 @@ export default function DreRealizadaPage() {
                 </div>
               </div>
 
+              {/* Centro de Resultado */}
+              {crOpcoes.length > 0 && (
+                <div className="border-b border-gray-100 px-4 py-4">
+                  <p className="text-sm font-semibold text-gray-700 mb-3 flex items-center justify-between">
+                    Centro de Resultado
+                    {(rascunho.crIds?.length ?? 0) > 0 && (
+                      <span onClick={() => setRascunho(r => ({ ...r, crIds: [] }))}
+                        className="text-[11px] text-blue-600 hover:underline cursor-pointer font-normal">limpar</span>
+                    )}
+                  </p>
+                  <div className="space-y-0.5">
+                    {crOpcoes.map(cr => (
+                      <label key={cr.CODCENCUS}
+                        className="flex items-center gap-2 py-1.5 px-1 cursor-pointer hover:bg-gray-50 rounded text-sm text-gray-700">
+                        <input type="checkbox"
+                          checked={rascunho.crIds?.includes(cr.CODCENCUS)}
+                          onChange={e => setRascunho(r => ({
+                            ...r,
+                            crIds: e.target.checked
+                              ? [...(r.crIds ?? []), cr.CODCENCUS]
+                              : (r.crIds ?? []).filter(id => id !== cr.CODCENCUS),
+                          }))}
+                          className="w-4 h-4 rounded cursor-pointer flex-shrink-0"
+                          style={{ accentColor: "#1e3a5f" }} />
+                        <span className="truncate" title={cr.DESCRCENCUS}>
+                          <span className="text-gray-400 text-xs mr-1">{cr.CODCENCUS}</span>
+                          {cr.DESCRCENCUS}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Exibição */}
               <div className="px-4 py-4">
                 <p className="text-sm font-semibold text-gray-700 mb-3">Exibição</p>
@@ -875,3 +1204,4 @@ export default function DreRealizadaPage() {
     </div>
   );
 }
+

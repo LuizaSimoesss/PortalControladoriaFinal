@@ -23,6 +23,9 @@ export interface CentroResultadoRow {
   TIPO_REGISTRO: TipoRegistro;
   ENTRA_RESULTADO: "DRE" | "DFC" | "AMBOS" | "NÃO ENTRA";
   CLASSIFICACAO: "" | "DESPESA" | "CUSTO";
+  CIDADE?: string;
+  GRAU_1?: string;
+  CODCENCUSPAI?: string;
 }
 
 export interface ProjetoRow {
@@ -92,7 +95,11 @@ export interface IndicadorRow {
   descricao?: string;
   categoria?: "ESTOQUE" | "MENSAL";
   fontes?: FonteIndicador[];
-  formula?: FormulaItem[]; // SUBTOTAL: undefined=agrega filhos; array=fórmula personalizada
+  formula?: FormulaItem[];
+  polo_cidade?: string;
+  parceiro?: string;
+  projeto?: string;
+  cliente?: string;
 }
 
 export interface Fechamento {
@@ -127,11 +134,17 @@ export interface LancamentoIndicador {
   id: string;
   importacaoId?: string;
   tipo: "realizado" | "orcado";
-  data: string;          // "YYYY-MM-DD"
-  periodo: string;       // "YYYY-MM" derivado de data
+  data: string;
+  periodo: string;
   cod_indicador: string;
   unidade: UnidadeIndicador;
   valor: number;
+  polo_cidade?: string;
+  parceiro?: string;
+  projeto?: string;
+  cliente?: string;
+  adquirida?: string;
+  comentario?: string;
 }
 
 export interface ImportacaoIndicador {

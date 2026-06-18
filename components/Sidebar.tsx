@@ -2,13 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { prefetchKeys, PREFETCH_ORCADO_KEYS } from "@/lib/storage";
 import {
   BookOpen, Building2, FolderOpen, Users, Briefcase,
   TrendingUp, BarChart3, FileSpreadsheet, Settings,
   ChevronDown, ChevronRight, Network, PanelLeftClose, PanelLeftOpen,
-  LayoutDashboard, Plug, ClipboardList, PieChart, ShieldAlert, AlertTriangle,
+  LayoutDashboard, Plug, ClipboardList, PieChart, ShieldAlert, AlertTriangle, Target, FileDown, MapPin, GitMerge, Database,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, createContext, useContext, useEffect } from "react";
+
+const MobileCloseCtx = createContext<() => void>(() => {});
 
 interface MenuItem {
   label: string;
@@ -32,6 +35,7 @@ const menuItems: MenuItem[] = [
       { label: "Adquiridas",          path: "/cadastros/adquiridas",       icon: <Briefcase size={15} /> },
       { label: "Indicadores",         path: "/cadastros/indicadores",      icon: <TrendingUp size={15} /> },
       { label: "Demonstrativos",      path: "/cadastros/demonstrativos",   icon: <LayoutDashboard size={15} /> },
+      { label: "Polo",                path: "/cadastros/polo",             icon: <MapPin size={15} /> },
     ],
   },
   {
@@ -44,17 +48,102 @@ const menuItems: MenuItem[] = [
     ],
   },
   {
+    label: "Orçado",
+    shortLabel: "Orçado",
+    icon: <Target size={18} />,
+    children: [
+      {
+        label: "Orçamento",
+        icon: <BarChart3 size={15} />,
+        children: [
+          {
+            label: "Receita",
+            icon: <TrendingUp size={14} />,
+            children: [
+              { label: "Gestão de Recursos",  path: "/orcamento/receita/gestao-recursos",     icon: <BarChart3 size={13} /> },
+              { label: "Investment Banking",  path: "/orcamento/receita/investment-banking",   icon: <BarChart3 size={13} /> },
+              { label: "Advisory",            path: "/orcamento/receita/advisory",             icon: <BarChart3 size={13} /> },
+              { label: "Research",            path: "/orcamento/receita/research",             icon: <BarChart3 size={13} /> },
+            ],
+          },
+          {
+            label: "Gastos",
+            icon: <TrendingUp size={14} />,
+            children: [
+              { label: "Pacote de Pessoal",                 path: "/orcamento/gastos/pacote-pessoal",                 icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Certificação",            path: "/orcamento/gastos/pacote-certificacao",            icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Incentivos Comerciais",   path: "/orcamento/gastos/pacote-incentivos-comerciais",   icon: <BarChart3 size={13} /> },
+              { label: "Pacote Institucional",              path: "/orcamento/gastos/pacote-institucional",           icon: <BarChart3 size={13} /> },
+              { label: "Pacote Ocupação",                   path: "/orcamento/gastos/pacote-ocupacao",                icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Eventos",                 path: "/orcamento/gastos/pacote-eventos",                 icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Serviços Especializados", path: "/orcamento/gastos/pacote-servicos-especializados", icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Serviços Jurídicos",      path: "/orcamento/gastos/pacote-servicos-juridicos",      icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Tecnologia",              path: "/orcamento/gastos/pacote-tecnologia",              icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Viagens",                 path: "/orcamento/gastos/pacote-viagens",                 icon: <BarChart3 size={13} /> },
+            ],
+          },
+        ],
+      },
+      {
+        label: "Forecast",
+        icon: <TrendingUp size={15} />,
+        children: [
+          {
+            label: "Receita",
+            icon: <TrendingUp size={14} />,
+            children: [
+              { label: "Gestão de Recursos",  path: "/orcamento/forecast/receita/gestao-recursos",     icon: <BarChart3 size={13} /> },
+              { label: "Investment Banking",  path: "/orcamento/forecast/receita/investment-banking",   icon: <BarChart3 size={13} /> },
+              { label: "Advisory",            path: "/orcamento/forecast/receita/advisory",             icon: <BarChart3 size={13} /> },
+              { label: "Research",            path: "/orcamento/forecast/receita/research",             icon: <BarChart3 size={13} /> },
+            ],
+          },
+          {
+            label: "Gastos",
+            icon: <TrendingUp size={14} />,
+            children: [
+              { label: "Pacote de Pessoal",                 path: "/orcamento/forecast/gastos/pacote-pessoal",                 icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Certificação",            path: "/orcamento/forecast/gastos/pacote-certificacao",            icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Incentivos Comerciais",   path: "/orcamento/forecast/gastos/pacote-incentivos-comerciais",   icon: <BarChart3 size={13} /> },
+              { label: "Pacote Institucional",              path: "/orcamento/forecast/gastos/pacote-institucional",           icon: <BarChart3 size={13} /> },
+              { label: "Pacote Ocupação",                   path: "/orcamento/forecast/gastos/pacote-ocupacao",                icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Eventos",                 path: "/orcamento/forecast/gastos/pacote-eventos",                 icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Serviços Especializados", path: "/orcamento/forecast/gastos/pacote-servicos-especializados", icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Serviços Jurídicos",      path: "/orcamento/forecast/gastos/pacote-servicos-juridicos",      icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Tecnologia",              path: "/orcamento/forecast/gastos/pacote-tecnologia",              icon: <BarChart3 size={13} /> },
+              { label: "Pacote de Viagens",                 path: "/orcamento/forecast/gastos/pacote-viagens",                 icon: <BarChart3 size={13} /> },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+  {
     label: "Relatórios",
     shortLabel: "Relat.",
     icon: <PieChart size={18} />,
     children: [
       {
-        label: "Dem. Resultado do Exercício",
+        label: "DRE - Gerencial",
         icon: <BarChart3 size={15} />,
         children: [
-          { label: "Realizada",    path: "/relatorios/demonstracao-resultado-exercicio/realizada",    icon: <BarChart3 size={14} /> },
-          { label: "Orçado",      path: "/relatorios/demonstracao-resultado-exercicio/orcado",      icon: <BarChart3 size={14} /> },
-          { label: "Orç × Real",  path: "/relatorios/demonstracao-resultado-exercicio/comparativo", icon: <BarChart3 size={14} /> },
+          { label: "Realizada",    path: "/relatorios/demonstracao-resultado-exercicio/realizada",         icon: <BarChart3 size={14} /> },
+          { label: "Orçado",      path: "/relatorios/demonstracao-resultado-exercicio/orcado",         icon: <BarChart3 size={14} /> },
+          { label: "Orç × Real",  path: "/relatorios/demonstracao-resultado-exercicio/comparativo",    icon: <BarChart3 size={14} /> },
+          { label: "Ano × Ano",   path: "/relatorios/demonstracao-resultado-exercicio/comparativo-anos", icon: <BarChart3 size={14} /> },
+          { label: "Forecast",    path: "/relatorios/demonstracao-resultado-exercicio/forecast",        icon: <BarChart3 size={14} /> },
+        ],
+      },
+      {
+        label: "DRE - Contábil",
+        icon: <BarChart3 size={15} />,
+        children: [
+          { label: "Realizada",   path: "/relatorios/demonstracao-resultado-contabil/realizada",            icon: <BarChart3 size={14} /> },
+          { label: "Orçado",      path: "/relatorios/demonstracao-resultado-contabil/orcado",            icon: <BarChart3 size={14} /> },
+          { label: "Orç × Real",  path: "/relatorios/demonstracao-resultado-contabil/comparativo",       icon: <BarChart3 size={14} /> },
+          { label: "Ano × Ano",       path: "/relatorios/demonstracao-resultado-contabil/comparativo-anos",             icon: <BarChart3 size={14} /> },
+          { label: "Ano × Ano × Orç", path: "/relatorios/demonstracao-resultado-contabil/comparativo-anos-orcamento", icon: <BarChart3 size={14} /> },
+          { label: "Forecast",        path: "/relatorios/demonstracao-resultado-contabil/forecast",                   icon: <BarChart3 size={14} /> },
         ],
       },
       {
@@ -66,6 +155,15 @@ const menuItems: MenuItem[] = [
           { label: "Orç × Real", path: "/relatorios/indicadores/comparativo",  icon: <TrendingUp size={14} /> },
         ],
       },
+      {
+        label: "Receita",
+        icon: <TrendingUp size={15} />,
+        children: [
+          { label: "Folha Business", path: "/relatorios/receita/folha-business", icon: <FileSpreadsheet size={14} /> },
+        ],
+      },
+      { label: "Subscrição", path: "/relatorios/subscricao", icon: <GitMerge size={15} /> },
+      { label: "Gerar Relatórios", path: "/relatorios/gerar", icon: <FileDown size={14} /> },
     ],
   },
   {
@@ -73,8 +171,19 @@ const menuItems: MenuItem[] = [
     shortLabel: "Valid.",
     icon: <ShieldAlert size={18} />,
     children: [
-      { label: "Lançtos. sem Alocação", path: "/validacoes/lancamentos-sem-alocacao",         icon: <AlertTriangle size={15} /> },
+{ label: "DRE Gerencial", path: "/validacoes/dre-gerencial", icon: <BarChart3 size={15} /> },
+      { label: "DRE Contábil", path: "/validacoes/dre-contabil", icon: <BarChart3 size={15} /> },
+      { label: "Dados Históricos", path: "/validacoes/dados-historicos", icon: <BarChart3 size={15} /> },
       { label: "Receitas", path: "/validacoes/gestao-fundos-consultoria", icon: <Briefcase size={15} /> },
+    ],
+  },
+  {
+    label: "Salesforce",
+    shortLabel: "SF",
+    icon: <Database size={18} />,
+    children: [
+      { label: "Consultas", path: "/salesforce/consultas", icon: <Database size={15} /> },
+      { label: "Subscrição", path: "/relatorios/subscricao", icon: <GitMerge size={15} /> },
     ],
   },
   {
@@ -86,7 +195,15 @@ const menuItems: MenuItem[] = [
         label: "Integrações",
         icon: <Plug size={15} />,
         children: [
-          { label: "Sankhya", path: "/configuracoes/sankhya", icon: <Network size={14} /> },
+          { label: "Sankhya",     path: "/configuracoes/sankhya",     icon: <Network size={14} /> },
+          {
+            label: "Salesforce",
+            icon: <Network size={14} />,
+            children: [
+              { label: "Credenciais",     path: "/configuracoes/salesforce",                    icon: <Network size={13} /> },
+              { label: "Consulta Tabela", path: "/configuracoes/salesforce/consulta-tabela",    icon: <Database size={13} /> },
+            ],
+          },
         ],
       },
     ],
@@ -102,12 +219,14 @@ function isActive(item: MenuItem, pathname: string): boolean {
 function SubItem({ item, depth }: { item: MenuItem; depth: number }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(() => isActive(item, pathname));
+  const onMobileClose = useContext(MobileCloseCtx);
 
   if (!item.children) {
     const active = item.path ? (pathname === item.path || pathname.startsWith(item.path + "/")) : false;
     return (
       <Link
         href={item.path!}
+        onClick={onMobileClose}
         style={{ paddingLeft: `${12 + depth * 14}px` }}
         className={`flex items-center gap-2 pr-4 py-2 text-sm whitespace-nowrap transition-all rounded-sm mx-1 ${
           active ? "bg-[#0078D4] text-white font-medium" : "text-white/80 hover:bg-white/10 hover:text-white"
@@ -137,7 +256,12 @@ function SubItem({ item, depth }: { item: MenuItem; depth: number }) {
   );
 }
 
-export default function Sidebar() {
+interface SidebarProps {
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
+}
+
+export default function Sidebar({ mobileOpen = false, onMobileClose = () => {} }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -146,6 +270,12 @@ export default function Sidebar() {
     return idx >= 0 ? idx : 0;
   });
   const [panelOpen, setPanelOpen] = useState(true);
+
+  useEffect(() => {
+    function handler() { setPanelOpen(false); }
+    window.addEventListener("sidebar-close-panel", handler);
+    return () => window.removeEventListener("sidebar-close-panel", handler);
+  }, []);
 
   const handleIconClick = (idx: number, item: MenuItem) => {
     if (item.path) {
@@ -159,13 +289,19 @@ export default function Sidebar() {
     } else {
       setActiveCatIdx(idx);
       setPanelOpen(true);
+      if (item.label === "Orçado") prefetchKeys(PREFETCH_ORCADO_KEYS);
     }
   };
 
   const activeItem = activeCatIdx !== null ? menuItems[activeCatIdx] : null;
 
   return (
-    <div className="flex h-screen flex-shrink-0">
+    <MobileCloseCtx.Provider value={onMobileClose}>
+    <div
+      className={`flex h-screen flex-shrink-0 fixed md:relative inset-y-0 left-0 z-40 transition-transform duration-200 ${
+        mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
+      }`}
+    >
       {/* ── Panel 1: Icon strip ── */}
       <div className="flex flex-col h-full flex-shrink-0" style={{ width: 58, background: "#002b5c" }}>
         {/* Logo */}
@@ -243,5 +379,6 @@ export default function Sidebar() {
         </div>
       )}
     </div>
+    </MobileCloseCtx.Provider>
   );
 }

@@ -89,6 +89,9 @@ export interface SankhyaEntityQuery {
   // Use this for hierarchical tables where the CRUD entity endpoint returns
   // only root-level records instead of all rows.
   sql?: string;
+  // When set alongside sql, enables keyset pagination via WHERE pkField > lastValue
+  // instead of OFFSET — bypasses Sankhya's ~1000-row server-side cap.
+  pkField?: string;
 }
 
 export interface SankhyaQueryResult {
@@ -116,7 +119,7 @@ async function doQueryRequest(
       // If the query has an explicit SQL string, send only that — the route will
       // use DbExplorerSP.executeQuery directly and skip the CRUD path entirely.
       ...(query.sql
-        ? { sql: query.sql }
+        ? { sql: query.sql, pkField: query.pkField }
         : {
             entity: query.entity,
             sqlTable: query.sqlTable,
@@ -178,25 +181,30 @@ export const QUERIES: Record<string, SankhyaEntityQuery> = {
     entity: "Natureza", sqlTable: "TGFNAT",
     fields: "CODNAT,DESCRNAT,GRAU,ANALITICA,ATIVA", sqlOrder: "CODNAT",
     sql: "SELECT CODNAT, DESCRNAT, GRAU, ANALITICA, ATIVA FROM TGFNAT ORDER BY CODNAT",
+    pkField: "CODNAT",
   },
   CENTRO_RESULTADO: {
     entity: "CentroResultado", sqlTable: "TSICUS",
-    fields: "CODCENCUS,DESCRCENCUS,ATIVO,GRAU,ANALITICO", sqlOrder: "CODCENCUS",
-    sql: "SELECT CODCENCUS, DESCRCENCUS, ATIVO, GRAU, ANALITICO FROM TSICUS ORDER BY CODCENCUS",
+    fields: "CODCENCUS,DESCRCENCUS,ATIVO,GRAU,ANALITICO,CODCENCUSPAI", sqlOrder: "CODCENCUS",
+    sql: "SELECT CODCENCUS, DESCRCENCUS, ATIVO, GRAU, ANALITICO, CODCENCUSPAI FROM TSICUS ORDER BY CODCENCUS",
+    pkField: "CODCENCUS",
   },
   PROJETOS: {
     entity: "Projeto", sqlTable: "TCSPRJ",
     fields: "CODPROJ,IDENTIFICACAO,ATIVO,GRAU,ANALITICO", sqlOrder: "CODPROJ",
     sql: "SELECT CODPROJ, IDENTIFICACAO, ATIVO, GRAU, ANALITICO FROM TCSPRJ ORDER BY CODPROJ",
+    pkField: "CODPROJ",
   },
   PARCEIRO: {
     entity: "Parceiro", sqlTable: "TGFPAR",
     fields: "CODPARC,NOMEPARC", sqlOrder: "CODPARC",
     sql: "SELECT CODPARC, NOMEPARC FROM TGFPAR ORDER BY CODPARC",
+    pkField: "CODPARC",
   },
   EMPRESAS: {
     entity: "Empresa", sqlTable: "TSIEMP",
     fields: "CODEMP,RAZAOSOCIAL,AD_EMPCLASS", sqlOrder: "CODEMP",
     sql: "SELECT CODEMP, RAZAOSOCIAL, AD_EMPCLASS FROM TSIEMP ORDER BY CODEMP",
+    pkField: "CODEMP",
   },
 };

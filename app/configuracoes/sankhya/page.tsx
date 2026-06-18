@@ -11,7 +11,7 @@ import {
   sankhyaLogin, sankhyaLogout, sankhyaQuery, QUERIES,
   type SankhyaConfig, type SankhyaSession, type AuthMethod, type Environment,
 } from "@/lib/sankhya";
-import { saveData, loadData, markStorageInitialized } from "@/lib/storage";
+import { saveData, loadDataAsync, markStorageInitialized } from "@/lib/storage";
 import type {
   NaturezaRow, CentroResultadoRow, ProjetoRow, ParceiroRow, EmpresaRow, TipoRegistro,
 } from "@/lib/mockData";
@@ -127,8 +127,8 @@ export default function ConfiguracoesPage() {
           setSession(refreshedSession);
         }
         const nativo = mapToNativo(t.key, rows);
-        // Preserve manually-created GERENCIAL records
-        const prev = loadData<{ TIPO_REGISTRO?: string }[]>(t.key, []);
+        // Preserve manually-created GERENCIAL records (use async load for IDB-backed keys)
+        const prev = await loadDataAsync<{ TIPO_REGISTRO?: string }[]>(t.key, []);
         const gerencial = prev.filter(r => r.TIPO_REGISTRO === "GERENCIAL");
         saveData(t.key, [...nativo, ...gerencial]);
         setSyncProgress(p => p.map((x, j) => j === i ? { ...x, status: "done", count: nativo.length } : x));
@@ -143,8 +143,9 @@ export default function ConfiguracoesPage() {
 
   function mapToNativo(key: string, rows: Record<string, unknown>[]): unknown[] {
     if (key === "portal_natureza") {
-      return rows.map((r, i): NaturezaRow => ({
-        id: `sync_nat_${i}`, CODNAT: String(r.CODNAT ?? ""), DESCRNAT: String(r.DESCRNAT ?? ""),
+      const uniqueNat = Array.from(new Map(rows.map(r => [String(r.CODNAT ?? ""), r])).values());
+      return uniqueNat.map((r): NaturezaRow => ({
+        id: `sync_nat_${String(r.CODNAT ?? "")}`, CODNAT: String(r.CODNAT ?? ""), DESCRNAT: String(r.DESCRNAT ?? ""),
         GRAU: Number(r.GRAU ?? 1), ANALITICA: r.ANALITICA === "S" || r.ANALITICA === true,
         ATIVA: r.ATIVA === "S" || r.ATIVA === true, TIPO_REGISTRO: "NATIVO" as TipoRegistro,
         ENTRA_RESULTADO: "DRE", CLASSIFICACAO: "", PACOTES: "",
@@ -166,8 +167,8 @@ export default function ConfiguracoesPage() {
       }));
     }
     if (key === "portal_parceiro") {
-      return rows.map((r, i): ParceiroRow => ({
-        id: `sync_parc_${i}`, CODPARC: String(r.CODPARC ?? ""),
+      return rows.map((r): ParceiroRow => ({
+        id: `parc_${r.CODPARC ?? ""}`, CODPARC: String(r.CODPARC ?? ""),
         NOMEPARC: String(r.NOMEPARC ?? ""), TIPO_REGISTRO: "NATIVO" as TipoRegistro,
       }));
     }

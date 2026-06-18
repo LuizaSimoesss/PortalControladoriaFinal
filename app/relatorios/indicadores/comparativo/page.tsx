@@ -4,6 +4,7 @@ import { Fragment, useState, useMemo } from "react";
 import { ChevronDown, ChevronRight as ChevronRt, Filter } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { usePersistedData } from "@/lib/storage";
+import { evalLinha, pk, type LinhaEval } from "@/lib/orcamento-eval";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,7 @@ interface FonteIndicador {
 }
 
 interface FormulaItem { subtotalId: string; sinal: "+" | "-"; }
+interface FormulaBloco { id: string; label?: string; sinal: "+" | "-"; items: FormulaItem[]; }
 
 interface IndicadorRow {
   id: string;
@@ -32,7 +34,68 @@ interface IndicadorRow {
   descricao?: string;
   categoria?: "ESTOQUE" | "MENSAL";
   fontes?: FonteIndicador[];
-  formula?: FormulaItem[];
+  formula?: FormulaBloco[] | FormulaItem[];
+  acumulado?: boolean;
+}
+
+function getFormulaBlocos(formula: unknown): FormulaBloco[] {
+  if (!Array.isArray(formula) || formula.length === 0) return [];
+  if ((formula[0] as FormulaItem).subtotalId !== undefined)
+    return [{ id: "__v1__", sinal: "+", items: formula as FormulaItem[] }];
+  return formula as FormulaBloco[];
+}
+
+// Orçamento blob types
+interface ComposicaoItemOrc { id: string; valores: Record<string, number>; }
+interface LinhaOrcamento {
+  id: string; categoria: string; tipo: string; codIndicador?: string;
+  isPercentual?: boolean; valores: Record<string, number>;
+  composicao?: ComposicaoItemOrc[];
+  formula?: unknown; formulaExpr?: unknown; subtotalLinhaIds?: string[];
+}
+interface SubBloco { id: string; linhas: LinhaOrcamento[]; }
+interface Bloco    { id: string; subBlocos: SubBloco[]; }
+
+// Compute one period from the orcamento blob map (mirrors orcado/page.tsx)
+function computePeriodOrcado(
+  indicadores: IndicadorRow[],
+  orcadoValores: Map<string, Map<string, number>>,
+  periodo: string,
+  prevValores?: Map<string, number>
+): Map<string, number> {
+  const valores = new Map<string, number>();
+  for (const ind of indicadores) {
+    if (ind.tipo !== "INDICADOR") continue;
+    valores.set(ind.id, orcadoValores.get(ind.id)?.get(periodo) ?? 0);
+  }
+  for (let i = indicadores.length - 1; i >= 0; i--) {
+    const ind = indicadores[i];
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
+    let total = 0;
+    for (let j = i + 1; j < indicadores.length; j++) {
+      if (indicadores[j].nivel <= ind.nivel) break;
+      if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
+    }
+    valores.set(ind.id, total);
+  }
+  for (const ind of indicadores) {
+    const blocos = getFormulaBlocos(ind.formula);
+    if (ind.tipo !== "SUBTOTAL" || blocos.length === 0) continue;
+    const total = blocos.reduce((sum, bloco) => {
+      const blocoVal = bloco.items.reduce(
+        (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0), 0
+      );
+      return sum + (bloco.sinal === "+" ? 1 : -1) * blocoVal;
+    }, 0);
+    valores.set(ind.id, total);
+  }
+  if (prevValores) {
+    for (const ind of indicadores) {
+      if (!ind.acumulado) continue;
+      valores.set(ind.id, (valores.get(ind.id) ?? 0) + (prevValores.get(ind.id) ?? 0));
+    }
+  }
+  return valores;
 }
 
 interface LancamentoIndicador {
@@ -123,10 +186,11 @@ function fmtVar(orc: number, real: number): { text: string; color: string } {
 function matchesRegra(cod: string, r: RegraItem | undefined): boolean {
   if (!r || r.modo === "none") return true;
   if (r.modo === "especifico") return r.codEspecifico ? cod === r.codEspecifico : true;
-  const cmp = (a: string, b: string) =>
-    a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-  if (r.codDe && cmp(cod, r.codDe) < 0) return false;
-  if (r.codAte && cmp(cod, r.codAte) > 0) return false;
+  // intervalo: compara numericamente se possível, lexicograficamente senão
+  const n = +cod;
+  const isNum = !isNaN(n);
+  if (r.codDe)  { const d = +r.codDe;  if (isNum && !isNaN(d) ? n < d : cod < r.codDe)  return false; }
+  if (r.codAte) { const a = +r.codAte; if (isNum && !isNaN(a) ? n > a : cod > r.codAte) return false; }
   return true;
 }
 
@@ -143,22 +207,29 @@ function getIndicadorLeaves(node: IndicadorRow, all: IndicadorRow[]): IndicadorR
 
 function computePeriodIndicadores(
   indicadores: IndicadorRow[],
-  lans: LancamentoIndicador[]
+  lans: LancamentoIndicador[],
+  prevValores?: Map<string, number>
 ): Map<string, number> {
   const valores = new Map<string, number>();
 
-  // Pass 1: INDICADOR leaves — sum from fontes
+  // Pass 1: INDICADOR leaves — sum from fontes (or implicit cod match when no fontes)
   for (const ind of indicadores) {
     if (ind.tipo !== "INDICADOR") continue;
-    if (!ind.fontes || ind.fontes.length === 0) { valores.set(ind.id, 0); continue; }
 
-    const counted = new Set<number>();
-    let total = 0;
     const implicitRegra: RegraItem | undefined = ind.codigo
       ? { modo: "especifico", codEspecifico: ind.codigo }
       : undefined;
 
-    for (const fonte of ind.fontes) {
+    const fontes = ind.fontes && ind.fontes.length > 0
+      ? ind.fontes
+      : implicitRegra ? [{ id: "__implicit__", tipo: "DIRETO" as const, codIndicador: implicitRegra }] : [];
+
+    if (fontes.length === 0) { valores.set(ind.id, 0); continue; }
+
+    const counted = new Set<number>();
+    let total = 0;
+
+    for (const fonte of fontes) {
       const regra = (fonte.codIndicador && fonte.codIndicador.modo !== "none")
         ? fonte.codIndicador : implicitRegra;
       if (!regra) continue;
@@ -176,25 +247,34 @@ function computePeriodIndicadores(
   // Pass 2: SUBTOTAL sem fórmula — bottom-up, agrega filhos diretos
   for (let i = indicadores.length - 1; i >= 0; i--) {
     const ind = indicadores[i];
-    if (ind.tipo !== "SUBTOTAL" || (Array.isArray(ind.formula) && ind.formula.length > 0)) continue;
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
     let total = 0;
     for (let j = i + 1; j < indicadores.length; j++) {
       if (indicadores[j].nivel <= ind.nivel) break;
-      if (indicadores[j].nivel === ind.nivel + 1) {
-        total += valores.get(indicadores[j].id) ?? 0;
-      }
+      if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
     }
     valores.set(ind.id, total);
   }
 
-  // Pass 3: SUBTOTAL com fórmula personalizada
+  // Pass 3: SUBTOTAL com fórmula(s) personalizada(s)
   for (const ind of indicadores) {
-    if (ind.tipo !== "SUBTOTAL" || !Array.isArray(ind.formula) || ind.formula.length === 0) continue;
-    const total = (ind.formula as FormulaItem[]).reduce(
-      (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0),
-      0
-    );
+    const blocos = getFormulaBlocos(ind.formula);
+    if (ind.tipo !== "SUBTOTAL" || blocos.length === 0) continue;
+    const total = blocos.reduce((sum, bloco) => {
+      const blocoVal = bloco.items.reduce(
+        (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0), 0
+      );
+      return sum + (bloco.sinal === "+" ? 1 : -1) * blocoVal;
+    }, 0);
     valores.set(ind.id, total);
+  }
+
+  // Pass 4: acumulado — soma valor do período anterior da própria linha
+  if (prevValores) {
+    for (const ind of indicadores) {
+      if (!ind.acumulado) continue;
+      valores.set(ind.id, (valores.get(ind.id) ?? 0) + (prevValores.get(ind.id) ?? 0));
+    }
   }
 
   return valores;
@@ -224,14 +304,65 @@ function aggregatePeriods(
   categoriaMap: Map<string, "ESTOQUE" | "MENSAL">
 ): Map<string, number> {
   const valores = new Map<string, number>();
+  const lastMi = meses[meses.length - 1];
+
+  // Step 1: leaf INDICADORs — ESTOQUE takes last month, MENSAL sums
   for (const ind of indicadores) {
+    if (ind.tipo !== "INDICADOR") continue;
+    valores.set(ind.id,
+      categoriaMap.get(ind.id) === "ESTOQUE"
+        ? (monthly[lastMi].get(ind.id) ?? 0)
+        : meses.reduce((s, mi) => s + (monthly[mi].get(ind.id) ?? 0), 0)
+    );
+  }
+
+  // Step 2: SUBTOTALs without formula — bottom-up, use already-aggregated children
+  for (let i = indicadores.length - 1; i >= 0; i--) {
+    const ind = indicadores[i];
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
     if (categoriaMap.get(ind.id) === "ESTOQUE") {
-      const lastMi = meses[meses.length - 1];
       valores.set(ind.id, monthly[lastMi].get(ind.id) ?? 0);
     } else {
-      valores.set(ind.id, meses.reduce((s, mi) => s + (monthly[mi].get(ind.id) ?? 0), 0));
+      let total = 0;
+      for (let j = i + 1; j < indicadores.length; j++) {
+        if (indicadores[j].nivel <= ind.nivel) break;
+        if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
+      }
+      valores.set(ind.id, total);
     }
   }
+
+  // Step 3: formula-based SUBTOTALs — apply formula to aggregated values
+  for (const ind of indicadores) {
+    const blocos = getFormulaBlocos(ind.formula);
+    if (ind.tipo !== "SUBTOTAL" || blocos.length === 0) continue;
+    if (categoriaMap.get(ind.id) === "ESTOQUE") {
+      valores.set(ind.id, monthly[lastMi].get(ind.id) ?? 0);
+    } else {
+      const total = blocos.reduce((sum, bloco) => {
+        const blocoVal = bloco.items.reduce(
+          (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0), 0
+        );
+        return sum + (bloco.sinal === "+" ? 1 : -1) * blocoVal;
+      }, 0);
+      valores.set(ind.id, total);
+    }
+  }
+
+  // Step 4: re-run non-formula SUBTOTALs bottom-up so parents of formula-SUBTOTALs
+  // pick up values computed in Step 3 (Step 2 ran before Step 3, so those parents had 0 for formula children)
+  for (let i = indicadores.length - 1; i >= 0; i--) {
+    const ind = indicadores[i];
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
+    if (categoriaMap.get(ind.id) === "ESTOQUE") continue; // already correct from Step 2
+    let total = 0;
+    for (let j = i + 1; j < indicadores.length; j++) {
+      if (indicadores[j].nivel <= ind.nivel) break;
+      if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
+    }
+    valores.set(ind.id, total);
+  }
+
   return valores;
 }
 
@@ -250,31 +381,78 @@ export default function IndicadoresComparativoPage() {
   const [indicadores] = usePersistedData<IndicadorRow[]>("portal_indicadores", []);
   const [lancamentos] = usePersistedData<LancamentoIndicador[]>("portal_lancamentos_indicadores", []);
 
+  // 14 orçamento blobs (orçado side reads from these, same as /relatorios/indicadores/orcado)
+  const [orcGestao]     = usePersistedData<Bloco[]>("portal_orcamento_gestao_recursos", []);
+  const [orcIB]         = usePersistedData<Bloco[]>("portal_orcamento_investment_banking", []);
+  const [orcAdvisory]   = usePersistedData<Bloco[]>("portal_orcamento_advisory", []);
+  const [orcResearch]   = usePersistedData<Bloco[]>("portal_orcamento_research", []);
+  const [orcPessoal]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_pessoal", []);
+  const [orcCert]       = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_certificacao", []);
+  const [orcIncentivos] = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_incentivos_comerciais", []);
+  const [orcInst]       = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_institucional", []);
+  const [orcOcupacao]   = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_ocupacao", []);
+  const [orcEventos]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_eventos", []);
+  const [orcServEsp]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_servicos_especializados", []);
+  const [orcServJur]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_servicos_juridicos", []);
+  const [orcTec]        = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_tecnologia", []);
+  const [orcViagens]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_viagens", []);
+
   const [collapsed,  setCollapsed]  = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
   const [filtros,    setFiltros]    = usePersistedData<Filtros>("portal_ind_filtros_comparativo", filtrosVazios);
   const [rascunho,   setRascunho]   = useState<Filtros>(filtrosVazios);
 
-  // Split lancamentos by tipo
-  const lancamentosOrcado = useMemo(
-    () => lancamentos.filter(l => l.tipo === "orcado"),
-    [lancamentos]
-  );
+  // Build indicadorId → (YYYY-MM → value) from orçamento blobs (handles digitado + calculado)
+  const orcadoValores = useMemo(() => {
+    const allBlocos: Bloco[] = [
+      ...orcGestao, ...orcIB, ...orcAdvisory, ...orcResearch,
+      ...orcPessoal, ...orcCert, ...orcIncentivos, ...orcInst,
+      ...orcOcupacao, ...orcEventos, ...orcServEsp, ...orcServJur,
+      ...orcTec, ...orcViagens,
+    ];
+    const map = new Map<string, Map<string, number>>();
+    for (const bloco of allBlocos) {
+      for (const sub of (bloco.subBlocos ?? [])) {
+        const todas = sub.linhas ?? [];
+        const allLinhasMap = new Map<string, LinhaEval>(todas.map(l => [l.id, l as LinhaEval]));
+        for (const linha of todas) {
+          if (linha.categoria !== "indicador" || !linha.codIndicador) continue;
+          if (!map.has(linha.codIndicador)) map.set(linha.codIndicador, new Map());
+          const indMap = map.get(linha.codIndicador)!;
+          if (linha.tipo === "digitado") {
+            const src = (linha.composicao && linha.composicao.length > 0)
+              ? linha.composicao.reduce((acc, item) => {
+                  for (const [k, v] of Object.entries(item.valores))
+                    acc[k] = (acc[k] ?? 0) + v;
+                  return acc;
+                }, {} as Record<string, number>)
+              : linha.valores;
+            for (const [k, v] of Object.entries(src)) {
+              if (v !== 0) indMap.set(k, (indMap.get(k) ?? 0) + v);
+            }
+          } else if (linha.tipo === "calculado") {
+            let ano = new Date().getFullYear();
+            for (const l of todas) {
+              const k = Object.keys(l.valores)[0];
+              if (k && k.length >= 4) { ano = parseInt(k.slice(0, 4)); break; }
+            }
+            for (let mi = 0; mi < 12; mi++) {
+              const v = evalLinha(linha as LinhaEval, todas as LinhaEval[], ano, mi, allLinhasMap);
+              if (v !== 0) indMap.set(pk(ano, mi), (indMap.get(pk(ano, mi)) ?? 0) + v);
+            }
+          }
+        }
+      }
+    }
+    return map;
+  }, [orcGestao, orcIB, orcAdvisory, orcResearch, orcPessoal, orcCert, orcIncentivos,
+      orcInst, orcOcupacao, orcEventos, orcServEsp, orcServJur, orcTec, orcViagens]);
+
+  // Index realizado lancamentos by periodo
   const lancamentosRealizado = useMemo(
     () => lancamentos.filter(l => l.tipo === "realizado"),
     [lancamentos]
   );
-
-  // Index by periodo — orcado
-  const orcadoPorPeriodo = useMemo(() => {
-    const map = new Map<string, LancamentoIndicador[]>();
-    for (const l of lancamentosOrcado) {
-      const bucket = map.get(l.periodo);
-      if (bucket) bucket.push(l);
-      else map.set(l.periodo, [l]);
-    }
-    return map;
-  }, [lancamentosOrcado]);
 
   // Index by periodo — realizado
   const realizadoPorPeriodo = useMemo(() => {
@@ -290,26 +468,30 @@ export default function IndicadoresComparativoPage() {
   // Categoria map
   const categoriaMap = useMemo(() => buildCategoriaMap(indicadores), [indicadores]);
 
-  // 12 monthly Maps for orçado
+  // 12 monthly Maps for orçado — from blobs via computePeriodOrcado
   const orcadoPorMes = useMemo(() => {
     const { periodoInicio, periodoFim } = filtros;
     const ano = periodoInicio.slice(0, 4);
-    return MESES.map((_, mi) => {
+    const maps: Map<string, number>[] = [];
+    MESES.forEach((_, mi) => {
       const p = `${ano}-${String(mi + 1).padStart(2, "0")}`;
-      if (p < periodoInicio || p > periodoFim) return new Map<string, number>();
-      return computePeriodIndicadores(indicadores, orcadoPorPeriodo.get(p) ?? []);
+      if (p < periodoInicio || p > periodoFim) { maps.push(new Map()); return; }
+      maps.push(computePeriodOrcado(indicadores, orcadoValores, p, maps[mi - 1]));
     });
-  }, [indicadores, orcadoPorPeriodo, filtros]);
+    return maps;
+  }, [indicadores, orcadoValores, filtros]);
 
-  // 12 monthly Maps for realizado
+  // 12 monthly Maps for realizado — sequential para acumulado
   const realizadoPorMes = useMemo(() => {
     const { periodoInicio, periodoFim } = filtros;
     const ano = periodoInicio.slice(0, 4);
-    return MESES.map((_, mi) => {
+    const maps: Map<string, number>[] = [];
+    MESES.forEach((_, mi) => {
       const p = `${ano}-${String(mi + 1).padStart(2, "0")}`;
-      if (p < periodoInicio || p > periodoFim) return new Map<string, number>();
-      return computePeriodIndicadores(indicadores, realizadoPorPeriodo.get(p) ?? []);
+      if (p < periodoInicio || p > periodoFim) { maps.push(new Map()); return; }
+      maps.push(computePeriodIndicadores(indicadores, realizadoPorPeriodo.get(p) ?? [], maps[mi - 1]));
     });
+    return maps;
   }, [indicadores, realizadoPorPeriodo, filtros]);
 
   // Unidade por indicador — based on lancamentos in the filtered period
@@ -318,11 +500,34 @@ export default function IndicadoresComparativoPage() {
     return lancamentos.filter(l => l.periodo >= periodoInicio && l.periodo <= periodoFim);
   }, [lancamentos, filtros]);
 
+  // Percentual indicators from orçamento blobs (codIndicador marked as isPercentual)
+  const percentualSetOrc = useMemo(() => {
+    const s = new Set<string>();
+    const allBlocos: Bloco[] = [
+      ...orcGestao, ...orcIB, ...orcAdvisory, ...orcResearch,
+      ...orcPessoal, ...orcCert, ...orcIncentivos, ...orcInst,
+      ...orcOcupacao, ...orcEventos, ...orcServEsp, ...orcServJur,
+      ...orcTec, ...orcViagens,
+    ];
+    for (const bloco of allBlocos)
+      for (const sub of (bloco.subBlocos ?? []))
+        for (const linha of (sub.linhas ?? []))
+          if (linha.categoria === "indicador" && linha.codIndicador && linha.isPercentual)
+            s.add(linha.codIndicador);
+    return s;
+  }, [orcGestao, orcIB, orcAdvisory, orcResearch, orcPessoal, orcCert, orcIncentivos,
+      orcInst, orcOcupacao, orcEventos, orcServEsp, orcServJur, orcTec, orcViagens]);
+
   const unidadeMap = useMemo(() => {
     const map = new Map<string, "valor" | "percentual">();
     for (const ind of indicadores) {
       if (ind.tipo !== "INDICADOR") continue;
-      // Check across both orcado and realizado lancamentos
+      // Check orçamento blobs first
+      if (percentualSetOrc.has(ind.id) || (ind.codigo && percentualSetOrc.has(ind.codigo))) {
+        map.set(ind.id, "percentual");
+        continue;
+      }
+      // Fall back to lancamentos de realizado
       const leaves = getIndicadorLeaves(ind, indicadores);
       const lans = lancamentosPeriodo.filter(l => {
         for (const leaf of leaves) {
@@ -342,7 +547,7 @@ export default function IndicadoresComparativoPage() {
       map.set(ind.id, isPercentual(lans) ? "percentual" : "valor");
     }
     return map;
-  }, [indicadores, lancamentosPeriodo]);
+  }, [indicadores, lancamentosPeriodo, percentualSetOrc]);
 
   // Period columns — for each group: orcado values + realizado values
   type ColData = {
@@ -461,10 +666,10 @@ export default function IndicadoresComparativoPage() {
     <div>
       <PageHeader title="Indicadores" subtitle="Comparativo Orçado × Realizado" />
 
-      <div className="p-6 space-y-4">
+      <div className="p-6 space-y-4 min-w-max">
 
         {/* ── Controles ──────────────────────────────────────────────────────── */}
-        <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-3">
           <button
             onClick={() => { setRascunho(filtros); setFilterOpen(true); }}
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors"
@@ -486,7 +691,7 @@ export default function IndicadoresComparativoPage() {
         </div>
 
         {/* ── Tabela ─────────────────────────────────────────────────────────── */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
           <div className="px-5 py-3 border-b border-gray-100">
             <span className="font-semibold text-gray-800 text-sm">
               Indicadores · Comparativo ·{" "}
@@ -494,7 +699,7 @@ export default function IndicadoresComparativoPage() {
             </span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div>
             <table className="text-sm border-collapse" style={{ minWidth: "max-content", width: "100%" }}>
               <thead>
                 {/* Row 1 — group labels */}
@@ -530,19 +735,19 @@ export default function IndicadoresComparativoPage() {
                   </th>
                 </tr>
 
-                {/* Row 2 — sub-labels: ORC | REAL | VAR% for each group + total */}
+                {/* Row 2 — sub-labels: REAL | ORC | VAR% for each group + total */}
                 <tr style={{ background: "#1e3a5f" }}>
                   {colunas.map((_, ci) => (
                     <Fragment key={ci}>
                       <th
                         className={`text-[10px] text-white/50 font-medium px-3 py-1 text-right whitespace-nowrap min-w-[100px]${ci > 0 ? " border-l border-white/10" : ""}`}
                         style={{ background: "#1e3a5f" }}>
-                        ORC
+                        REAL
                       </th>
                       <th
                         className="text-[10px] text-white/50 font-medium px-3 py-1 text-right whitespace-nowrap min-w-[100px]"
                         style={{ background: "#1e3a5f" }}>
-                        REAL
+                        ORC
                       </th>
                       <th
                         className="text-[10px] text-white/50 font-medium px-3 py-1 text-right whitespace-nowrap min-w-[80px]"
@@ -556,12 +761,12 @@ export default function IndicadoresComparativoPage() {
                   <th
                     className="text-[10px] text-white/50 font-medium px-3 py-1 text-right whitespace-nowrap min-w-[100px] border-l border-white/20"
                     style={{ background: "#152d4a" }}>
-                    ORC
+                    REAL
                   </th>
                   <th
                     className="text-[10px] text-white/50 font-medium px-3 py-1 text-right whitespace-nowrap min-w-[100px]"
                     style={{ background: "#152d4a" }}>
-                    REAL
+                    ORC
                   </th>
                   <th
                     className="text-[10px] text-white/50 font-medium px-3 py-1 text-right whitespace-nowrap min-w-[80px]"
@@ -619,18 +824,18 @@ export default function IndicadoresComparativoPage() {
                         const sep  = ci > 0;
                         return (
                           <Fragment key={ci}>
-                            {/* Orçado */}
-                            <td
-                              className={`px-3 py-2.5 text-right tabular-nums whitespace-nowrap${sep ? " border-l border-gray-100" : ""}`}>
-                              {orc !== 0
-                                ? <span className={orc < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(orc, pct)}</span>
-                                : <span style={{ opacity: 0.18 }}>—</span>}
-                            </td>
                             {/* Realizado */}
                             <td
-                              className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">
+                              className={`px-3 py-2.5 text-right tabular-nums whitespace-nowrap${sep ? " border-l border-gray-100" : ""}`}>
                               {real !== 0
                                 ? <span className={real < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(real, pct)}</span>
+                                : <span style={{ opacity: 0.18 }}>—</span>}
+                            </td>
+                            {/* Orçado */}
+                            <td
+                              className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap">
+                              {orc !== 0
+                                ? <span className={orc < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(orc, pct)}</span>
                                 : <span style={{ opacity: 0.18 }}>—</span>}
                             </td>
                             {/* Variação % */}
@@ -653,15 +858,15 @@ export default function IndicadoresComparativoPage() {
                             <td
                               className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap border-l border-gray-200"
                               style={{ background: s.bg === "white" ? "#fafafa" : undefined }}>
-                              {orcT !== 0
-                                ? <span className={orcT < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(orcT, pct)}</span>
+                              {realT !== 0
+                                ? <span className={realT < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(realT, pct)}</span>
                                 : <span style={{ opacity: 0.18 }}>—</span>}
                             </td>
                             <td
                               className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap"
                               style={{ background: s.bg === "white" ? "#fafafa" : undefined }}>
-                              {realT !== 0
-                                ? <span className={realT < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(realT, pct)}</span>
+                              {orcT !== 0
+                                ? <span className={orcT < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtValor(orcT, pct)}</span>
                                 : <span style={{ opacity: 0.18 }}>—</span>}
                             </td>
                             <td

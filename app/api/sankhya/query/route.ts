@@ -6,14 +6,17 @@ function getBaseUrl(env: string): string {
     : "https://api.sankhya.com.br";
 }
 
-// ── DbExplorerSP (raw SQL, paginated via SQL OFFSET/FETCH) ───────────────────
-// DbExplorerSP imposes a hard server-side row cap (~5 000). API-level pagination
-// parameters (totalPerPage/currentPage) are silently ignored. The only reliable
-// way to retrieve all rows is to embed OFFSET…ROWS FETCH NEXT…ROWS ONLY in the
-// SQL itself (Oracle 12c+ syntax, which all modern Sankhya installations use).
+// ── DbExplorerSP (raw SQL, paginated via keyset) ─────────────────────────────
+// DbExplorerSP imposes a hard server-side row cap per query (often ~1 000).
+// OFFSET-based pagination fails because the server caps the dataset before
+// applying OFFSET, so OFFSET beyond the cap always returns empty.
+// The reliable approach is keyset pagination: each round sends
+//   WHERE {pkField} > {lastValue} FETCH FIRST {N} ROWS ONLY
+// — the WHERE changes the dataset, so the server cap resets for each page.
+// For queries without a pkField, OFFSET/FETCH is used as a best-effort fallback.
 
 const SQL_PAGE_SIZE = 500; // rows per SQL page
-const SQL_BATCH = 10;      // concurrent requests per round
+const SQL_BATCH = 10;      // concurrent requests per round (OFFSET fallback only)
 
 function parseSqlRows(data: Record<string, unknown>): Record<string, unknown>[] {
   const body = data?.responseBody as Record<string, unknown> | undefined;
@@ -33,21 +36,17 @@ function parseSqlRows(data: Record<string, unknown>): Record<string, unknown>[] 
   });
 }
 
-async function fetchSqlOffset(
+async function executeSql(
   url: string,
   headers: Record<string, string>,
-  baseSql: string,
-  offset: number
+  sql: string
 ): Promise<Record<string, unknown>[]> {
   const sqlUrl = url.replace("CRUDServiceProvider.loadRecords", "DbExplorerSP.executeQuery");
-  // Append Oracle pagination clause directly to the caller's SQL.
-  // The base SQL already contains ORDER BY; OFFSET/FETCH must follow ORDER BY.
-  const pagedSql = `${baseSql} OFFSET ${offset} ROWS FETCH NEXT ${SQL_PAGE_SIZE} ROWS ONLY`;
 
   const response = await fetch(sqlUrl, {
     method: "POST",
     headers,
-    body: JSON.stringify({ serviceName: "DbExplorerSP.executeQuery", requestBody: { sql: pagedSql } }),
+    body: JSON.stringify({ serviceName: "DbExplorerSP.executeQuery", requestBody: { sql } }),
   });
 
   const text = await response.text();
@@ -61,6 +60,37 @@ async function fetchSqlOffset(
   return parseSqlRows(data);
 }
 
+// Keyset pagination: uses WHERE pkField > lastPk to paginate beyond server cap.
+async function fetchAllBySqlKeyset(
+  url: string,
+  headers: Record<string, string>,
+  baseSql: string,
+  pkField: string
+): Promise<Record<string, unknown>[]> {
+  const allRows: Record<string, unknown>[] = [];
+  let lastPk: unknown = null;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    let sql = baseSql;
+    if (lastPk !== null) {
+      // Inject WHERE before ORDER BY. All base SQLs follow the pattern
+      // "SELECT ... FROM table ORDER BY pk" with no existing WHERE clause.
+      const pkVal = Number(lastPk);
+      sql = baseSql.replace(/ ORDER BY /i, ` WHERE ${pkField} > ${pkVal} ORDER BY `);
+    }
+    const pagedSql = `${sql} FETCH FIRST ${SQL_PAGE_SIZE} ROWS ONLY`;
+
+    const rows = await executeSql(url, headers, pagedSql);
+    if (rows.length === 0) break;
+    allRows.push(...rows);
+    lastPk = rows[rows.length - 1][pkField];
+  }
+
+  return allRows;
+}
+
+// OFFSET fallback for queries without a pkField.
 async function fetchAllBySql(
   url: string,
   headers: Record<string, string>,
@@ -71,15 +101,16 @@ async function fetchAllBySql(
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // Fire SQL_BATCH pages concurrently, each with its own OFFSET clause.
     const offsets = Array.from({ length: SQL_BATCH }, (_, i) => offset + i * SQL_PAGE_SIZE);
-    const results = await Promise.all(offsets.map((off) => fetchSqlOffset(url, headers, baseSql, off)));
+    const results = await Promise.all(
+      offsets.map((off) => executeSql(url, headers, `${baseSql} OFFSET ${off} ROWS FETCH NEXT ${SQL_PAGE_SIZE} ROWS ONLY`))
+    );
 
     let done = false;
     for (const rows of results) {
       if (rows.length === 0) { done = true; break; }
       allRows.push(...rows);
-      if (rows.length < SQL_PAGE_SIZE) { done = true; break; } // last page
+      if (rows.length < SQL_PAGE_SIZE) { done = true; break; }
     }
     if (done) break;
     offset += SQL_BATCH * SQL_PAGE_SIZE;
@@ -186,7 +217,7 @@ export async function POST(req: NextRequest) {
   try {
     const {
       environment, bearerToken, xToken, appkey,
-      entity, sqlTable, fields, filter, sqlFilter, sqlOrder, sql,
+      entity, sqlTable, fields, filter, sqlFilter, sqlOrder, sql, pkField,
     } = await req.json();
 
 
@@ -208,7 +239,9 @@ export async function POST(req: NextRequest) {
     let method = "crud";
 
     if (sql) {
-      rows = await fetchAllBySql(crudUrl, headers, sql);
+      rows = pkField
+        ? await fetchAllBySqlKeyset(crudUrl, headers, sql, pkField)
+        : await fetchAllBySql(crudUrl, headers, sql);
       method = "sql-direct";
     } else {
       const table = sqlTable || entity;

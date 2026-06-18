@@ -290,20 +290,27 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
   }
 
   // Etapa 2 — arquivo + validação
-  const [rows, setRows] = useState<ImportRow[]>([]);
+  // Armazena separado: linhas válidas (sem raw, só lancamento) e inválidas (com raw para exibição de erro)
+  const [validRows,   setValidRows]   = useState<Omit<LancamentoFinanceiro, "id" | "fechamentoId">[]>([]);
+  const [invalidRows, setInvalidRows] = useState<ImportRow[]>([]);
+  const [totalRows,   setTotalRows]   = useState(0);
   const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<{ atual: number; total: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const isRealizado = tipo === "realizado";
   const colPeriodo  = isRealizado ? "AD_DTDECOMPETENCIA" : "PERIODO";
   const colValor    = isRealizado ? "VALOR_FINAL" : "VALOR";
 
-  // Tenta múltiplos nomes de coluna (case-insensitive pelo normalizeHeaders) e retorna o primeiro valor não vazio
+  // Tenta múltiplos nomes de coluna e retorna o primeiro valor não vazio e não "-" (traço isolado)
   function resolveRaw(raw: Record<string, string>, ...candidates: string[]): string {
     for (const c of candidates) {
       const v = raw[c];
-      if (v !== undefined && v.trim() !== "") return v.trim();
+      if (v !== undefined) {
+        const t = v.trim();
+        if (t !== "" && t !== "-") return t;
+      }
     }
     return "";
   }
@@ -354,7 +361,7 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
 
     // Valor — tenta múltiplos nomes de coluna
     const valorRaw = isRealizado
-      ? resolveRaw(raw, "VALOR_FINAL", "VALOR", "VLR_FINAL", "VLRFINAL")
+      ? resolveRaw(raw, "VALOR_FINAL", "VLR_DESDOB", "VALOR", "VLR_FINAL", "VLRFINAL")
       : resolveRaw(raw, "VALOR", "VALOR_FINAL", "VALOR_ORCADO", "VLR_ORCADO", "VLRORCADO", "BUDGET", "VLR");
     const valorParsed = parseValor(valorRaw);
     // Vazio → 0 (lançamento de ajuste/zeramento); texto inválido → erro
@@ -380,7 +387,9 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
 
     if (erros.length > 0) return { raw, erros };
 
-    const dataISO = parseDataCompleta(periodoRaw) ?? (periodo ? periodo + "-01" : dataHoje());
+    // Data: usa AD_DTDECOMPETENCIA; se vazio, cai para DTNEG
+    const dataRaw = resolveRaw(raw, "AD_DTDECOMPETENCIA") || resolveRaw(raw, "DTNEG");
+    const dataISO = parseDataCompleta(dataRaw) ?? parseDataCompleta(periodoRaw) ?? (periodo ? periodo + "-01" : dataHoje());
     return {
       raw, erros: [],
       lancamento: {
@@ -397,30 +406,74 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
     if (!file) return;
     const isExcel = /\.(xlsx|xls)$/i.test(file.name);
     setLoading(true);
-    setRows([]);
+    setValidRows([]);
+    setInvalidRows([]);
+    setTotalRows(0);
+    setProgress(null);
+
+    const worker = new Worker("/xlsx-import-worker.js");
+
+    worker.onmessage = (ev: MessageEvent) => {
+      const msg = ev.data;
+      if (msg.type === "status") {
+        // apenas lendo arquivo — mostra spinner sem barra
+        setProgress(null);
+      } else if (msg.type === "parsed") {
+        setProgress({ atual: 0, total: msg.total });
+      } else if (msg.type === "progress") {
+        setProgress({ atual: msg.atual, total: msg.total });
+      } else if (msg.type === "done") {
+        setValidRows(msg.validRows);
+        setInvalidRows(msg.invalidRows);
+        setTotalRows(msg.total);
+        setProgress(null);
+        setDone(false);
+        setLoading(false);
+        worker.terminate();
+      } else if (msg.type === "error") {
+        setValidRows([]);
+        setInvalidRows([]);
+        setTotalRows(0);
+        setProgress(null);
+        setDone(false);
+        setLoading(false);
+        worker.terminate();
+        alert(`Erro ao processar arquivo: ${msg.message}`);
+      }
+    };
+
+    worker.onerror = () => {
+      setLoading(false);
+      setProgress(null);
+      worker.terminate();
+      alert("Erro ao iniciar processamento. Tente novamente.");
+    };
+
     const reader = new FileReader();
     reader.onload = ev => {
       const result = ev.target?.result;
-      const parsed = isExcel
-        ? parseSheetRows(XLSX.read(result, { type: "array" }))
-        : parseCSVText(result as string);
-      setRows(parsed.map(validateRow));
-      setDone(false);
-      setLoading(false);
+      worker.postMessage({
+        buffer:   isExcel ? result : undefined,
+        csvText:  isExcel ? undefined : result as string,
+        isExcel,
+        tipo,
+        natArr:  [...natSet],
+        crArr:   [...crSet],
+        empArr:  [...empSet],
+        projArr: [...projSet],
+        parcArr: [...parcSet],
+      }, isExcel ? [result as ArrayBuffer] : []);
     };
     if (isExcel) reader.readAsArrayBuffer(file);
     else reader.readAsText(file, "utf-8");
   }
-
-  const validas   = rows.filter(r => r.erros.length === 0);
-  const invalidas = rows.filter(r => r.erros.length > 0);
 
   async function handleImport() {
     setLoading(true);
     try {
       await onImport(
         { label, mesReferencia: mesRef, tipo, ativo: marcarAtivo, criadoEm: new Date().toISOString() },
-        validas.map(r => r.lancamento!)
+        validRows
       );
       // Se onImport não fechou o modal (ex: erro interno), marca como concluído
       setDone(true);
@@ -488,10 +541,29 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
       <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 flex flex-col" style={{ maxHeight: "90vh" }}>
         {/* Overlay de carregando */}
         {loading && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-white/90">
-            <div className="w-10 h-10 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin mb-3" />
-            <p className="text-sm font-medium text-gray-700">Processando arquivo…</p>
-            <p className="text-xs text-gray-400 mt-1">Aguarde, isso pode levar alguns segundos.</p>
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-white/90 px-10">
+            <div className="w-10 h-10 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin mb-4" />
+            {progress && progress.total > 0 ? (
+              <>
+                <p className="text-sm font-medium text-gray-700 mb-2">
+                  Validando linhas… {progress.atual.toLocaleString("pt-BR")} / {progress.total.toLocaleString("pt-BR")}
+                </p>
+                <div className="w-full bg-gray-100 rounded-full h-2">
+                  <div
+                    className="h-2 rounded-full transition-all duration-100"
+                    style={{ width: `${Math.round((progress.atual / progress.total) * 100)}%`, background: "#1e3a5f" }}
+                  />
+                </div>
+                <p className="text-xs text-gray-400 mt-2">
+                  {Math.round((progress.atual / progress.total) * 100)}%
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-medium text-gray-700">Lendo arquivo…</p>
+                <p className="text-xs text-gray-400 mt-1">Arquivos grandes podem levar até 30 segundos.</p>
+              </>
+            )}
           </div>
         )}
         {/* Header */}
@@ -604,21 +676,21 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
               </div>
 
               {/* Preview */}
-              {rows.length > 0 && !done && (
+              {totalRows > 0 && !done && (
                 <div className="space-y-3">
                   <div className="flex items-center gap-3">
-                    <span className="text-sm font-medium text-gray-700">{rows.length} linhas lidas</span>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">{validas.length} válidas</span>
-                    {invalidas.length > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">{invalidas.length} com erro</span>}
+                    <span className="text-sm font-medium text-gray-700">{totalRows.toLocaleString("pt-BR")} linhas lidas</span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700">{validRows.length.toLocaleString("pt-BR")} válidas</span>
+                    {invalidRows.length > 0 && <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">{invalidRows.length.toLocaleString("pt-BR")} com erro</span>}
                   </div>
-                  {invalidas.length > 0 && (
+                  {invalidRows.length > 0 && (
                     <div className="border border-red-200 rounded-lg overflow-hidden">
                       <div className="px-3 py-2 bg-red-50 border-b border-red-200 flex items-center gap-2">
                         <AlertTriangle size={13} className="text-red-500" />
                         <span className="text-xs font-semibold text-red-700">Linhas com erro (não serão importadas)</span>
                       </div>
                       <div className="max-h-40 overflow-y-auto divide-y divide-red-100">
-                        {invalidas.map((r, i) => (
+                        {invalidRows.map((r, i) => (
                           <div key={i} className="px-3 py-2">
                             <p className="text-xs text-gray-500 font-mono truncate">{JSON.stringify(r.raw)}</p>
                             <ul className="mt-1 space-y-0.5">
@@ -634,7 +706,7 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
 
               {done && (
                 <div className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-3 font-medium">
-                  ✓ {validas.length} lançamentos importados com sucesso no fechamento <strong>{label}</strong>.
+                  ✓ {validRows.length.toLocaleString("pt-BR")} lançamentos importados com sucesso no fechamento <strong>{label}</strong>.
                 </div>
               )}
             </>
@@ -663,12 +735,12 @@ function ImportModal({ tipo, natRows, crRows, projRows, parcRows, empRows, onImp
                 Próximo →
               </button>
             )}
-            {step === 2 && !done && validas.length > 0 && (
+            {step === 2 && !done && validRows.length > 0 && (
               <button onClick={handleImport} disabled={loading}
                 className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-60"
                 style={{ background: "#16a34a" }}>
                 {loading && <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                {loading ? "Importando…" : `Importar ${validas.length} lançamento${validas.length !== 1 ? "s" : ""}`}
+                {loading ? "Importando…" : `Importar ${validRows.length.toLocaleString("pt-BR")} lançamento${validRows.length !== 1 ? "s" : ""}`}
               </button>
             )}
           </div>
@@ -869,11 +941,11 @@ export default function LancamentosFinanceiroPage() {
   const [modal, setModal] = useState<{ open: boolean; modo: "add" | "edit"; form: Partial<LancamentoFinanceiro> } | null>(null);
   const [importOpen, setImportOpen] = useState(false);
 
-  const natRows  = useMemo(() => loadData<NaturezaRow[]>("portal_natureza", []), []);
-  const crRows   = useMemo(() => loadData<CentroResultadoRow[]>("portal_centro_resultado", []), []);
-  const projRows = useMemo(() => loadData<ProjetoRow[]>("portal_projetos", []), []);
-  const parcRows = useMemo(() => loadData<ParceiroRow[]>("portal_parceiro", []), []);
-  const empRows  = useMemo(() => loadData<EmpresaRow[]>("portal_empresas", []), []);
+  const [natRows]  = usePersistedData<NaturezaRow[]>("portal_natureza", []);
+  const [crRows]   = usePersistedData<CentroResultadoRow[]>("portal_centro_resultado", []);
+  const [projRows] = usePersistedData<ProjetoRow[]>("portal_projetos", []);
+  const [parcRows] = usePersistedData<ParceiroRow[]>("portal_parceiro", []);
+  const [empRows]  = usePersistedData<EmpresaRow[]>("portal_empresas", []);
 
   // ── Carrega lançamentos do IndexedDB no mount (+ migração legados) ──────────
   useEffect(() => {
@@ -936,6 +1008,8 @@ export default function LancamentosFinanceiroPage() {
       if (filtros.dataFim    && r.data > filtros.dataFim)   return false;
       if (!q) return true;
       return (
+        (r.nufin || "").toLowerCase().includes(q) ||
+        (r.historico || "").toLowerCase().includes(q) ||
         r.codnat.toLowerCase().includes(q) ||
         r.codcencus.toLowerCase().includes(q) ||
         r.codemp.toLowerCase().includes(q) ||
@@ -1284,7 +1358,7 @@ export default function LancamentosFinanceiroPage() {
                   );
                 })()}
 
-                <div className="overflow-x-auto">
+                <div className="overflow-auto" style={{ maxHeight: "calc(100vh - 280px)" }}>
                   <table className="w-full text-sm">
                     <thead>
                       <tr style={{ background: "#f8fafc" }}>

@@ -5,24 +5,15 @@ import * as XLSX from "xlsx";
 import { ChevronDown, ChevronRight as ChevronRt, Filter, Download } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import { usePersistedData } from "@/lib/storage";
+import { evalLinha, pk, type LinhaEval } from "@/lib/orcamento-eval";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type RegraMode = "none" | "especifico" | "intervalo";
-type ViewMode  = "mensal" | "trimestral" | "quadrimestral" | "semestral";
+type ViewMode      = "mensal" | "trimestral" | "quadrimestral" | "semestral";
 type IndicadorTipo = "SUBTOTAL" | "INDICADOR";
 
-interface RegraItem { modo: RegraMode; codEspecifico?: string; codDe?: string; codAte?: string; }
-
-interface FonteIndicador {
-  id: string;
-  tipo: "DRE" | "DIRETO";
-  demoItemId?: string;
-  codIndicador?: RegraItem;
-  centroResultado?: RegraItem;
-}
-
-interface FormulaItem { subtotalId: string; sinal: "+" | "-"; }
+interface FormulaItem  { subtotalId: string; sinal: "+" | "-"; }
+interface FormulaBloco { id: string; label?: string; sinal: "+" | "-"; items: FormulaItem[]; }
 
 interface IndicadorRow {
   id: string;
@@ -30,21 +21,24 @@ interface IndicadorRow {
   nivel: number;
   nome: string;
   codigo?: string;
-  descricao?: string;
   categoria?: "ESTOQUE" | "MENSAL";
-  fontes?: FonteIndicador[];
-  formula?: FormulaItem[];
+  formula?: FormulaBloco[] | FormulaItem[];
+  acumulado?: boolean;
 }
 
-interface LancamentoIndicador {
+// Minimal types for orçamento blobs
+interface ComposicaoItem { id: string; valores: Record<string, number>; }
+interface LinhaOrcamento {
   id: string;
-  tipo: "realizado" | "orcado";
-  data: string;
-  periodo: string;
-  cod_indicador: string;
-  unidade?: "valor" | "percentual";
-  valor: number;
+  categoria: string;
+  tipo: string;
+  codIndicador?: string;
+  isPercentual?: boolean;
+  valores: Record<string, number>;
+  composicao?: ComposicaoItem[];
 }
+interface SubBloco { id: string; linhas: LinhaOrcamento[]; }
+interface Bloco    { id: string; subBlocos: SubBloco[]; }
 
 interface Filtros {
   periodoInicio: string;
@@ -70,15 +64,15 @@ type GrupoDef = { label: string; sub: string; meses: number[] };
 const GRUPOS_DEF: Record<ViewMode, GrupoDef[]> = {
   mensal: MESES.map((label, i) => ({ label, sub: "", meses: [i] })),
   trimestral: [
-    { label: "1º Trim.",    sub: "Jan · Fev · Mar",                  meses: [0,1,2]        },
-    { label: "2º Trim.",    sub: "Abr · Mai · Jun",                  meses: [3,4,5]        },
-    { label: "3º Trim.",    sub: "Jul · Ago · Set",                  meses: [6,7,8]        },
-    { label: "4º Trim.",    sub: "Out · Nov · Dez",                  meses: [9,10,11]      },
+    { label: "1º Trim.",    sub: "Jan · Fev · Mar",                   meses: [0,1,2]        },
+    { label: "2º Trim.",    sub: "Abr · Mai · Jun",                   meses: [3,4,5]        },
+    { label: "3º Trim.",    sub: "Jul · Ago · Set",                   meses: [6,7,8]        },
+    { label: "4º Trim.",    sub: "Out · Nov · Dez",                   meses: [9,10,11]      },
   ],
   quadrimestral: [
-    { label: "1º Quadrim.", sub: "Jan · Fev · Mar · Abr",            meses: [0,1,2,3]      },
-    { label: "2º Quadrim.", sub: "Mai · Jun · Jul · Ago",            meses: [4,5,6,7]      },
-    { label: "3º Quadrim.", sub: "Set · Out · Nov · Dez",            meses: [8,9,10,11]    },
+    { label: "1º Quadrim.", sub: "Jan · Fev · Mar · Abr",             meses: [0,1,2,3]      },
+    { label: "2º Quadrim.", sub: "Mai · Jun · Jul · Ago",             meses: [4,5,6,7]      },
+    { label: "3º Quadrim.", sub: "Set · Out · Nov · Dez",             meses: [8,9,10,11]    },
   ],
   semestral: [
     { label: "1º Sem.",     sub: "Jan · Fev · Mar · Abr · Mai · Jun", meses: [0,1,2,3,4,5]  },
@@ -103,115 +97,85 @@ function fmtPct(v: number): string {
   return `${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
 }
 
-function isPercentual(lans: LancamentoIndicador[]): boolean {
-  return lans.length > 0 && lans.every(l => l.unidade === "percentual");
-}
-
 function fmtValor(v: number, pct: boolean): string {
   return pct ? fmtPct(v) : fmtInt(v);
 }
 
-function fmtDate(d: string): string {
-  const [y, m, day] = d.split("-");
-  return `${day}/${m}/${y}`;
-}
-
-function fmtPeriodo(p: string): string {
-  const [y, m] = p.split("-");
-  return `${MESES[parseInt(m) - 1]}/${y}`;
-}
-
-function matchesRegra(cod: string, r: RegraItem | undefined): boolean {
-  if (!r || r.modo === "none") return true;
-  if (r.modo === "especifico") return r.codEspecifico ? cod === r.codEspecifico : true;
-  const cmp = (a: string, b: string) =>
-    a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-  if (r.codDe && cmp(cod, r.codDe) < 0) return false;
-  if (r.codAte && cmp(cod, r.codAte) > 0) return false;
-  return true;
-}
-
-function getIndicadorLeaves(node: IndicadorRow, all: IndicadorRow[]): IndicadorRow[] {
-  if (node.tipo === "INDICADOR") return [node];
-  const idx = all.findIndex(r => r.id === node.id);
-  const leaves: IndicadorRow[] = [];
-  for (let i = idx + 1; i < all.length; i++) {
-    if (all[i].nivel <= node.nivel) break;
-    if (all[i].tipo === "INDICADOR") leaves.push(all[i]);
-  }
-  return leaves;
-}
-
-function computePeriodIndicadores(
-  indicadores: IndicadorRow[],
-  lans: LancamentoIndicador[]
-): Map<string, number> {
-  const valores = new Map<string, number>();
-
-  for (const ind of indicadores) {
-    if (ind.tipo !== "INDICADOR") continue;
-    if (!ind.fontes || ind.fontes.length === 0) { valores.set(ind.id, 0); continue; }
-
-    const counted = new Set<number>();
-    let total = 0;
-    const implicitRegra: RegraItem | undefined = ind.codigo
-      ? { modo: "especifico", codEspecifico: ind.codigo }
-      : undefined;
-
-    for (const fonte of ind.fontes) {
-      const regra = (fonte.codIndicador && fonte.codIndicador.modo !== "none")
-        ? fonte.codIndicador : implicitRegra;
-      if (!regra) continue;
-      for (let i = 0; i < lans.length; i++) {
-        if (counted.has(i)) continue;
-        const l = lans[i];
-        if (!matchesRegra(l.cod_indicador, regra)) continue;
-        counted.add(i);
-        total += l.valor;
-      }
-    }
-    valores.set(ind.id, total);
-  }
-
-  for (let i = indicadores.length - 1; i >= 0; i--) {
-    const ind = indicadores[i];
-    if (ind.tipo !== "SUBTOTAL" || (Array.isArray(ind.formula) && ind.formula.length > 0)) continue;
-    let total = 0;
-    for (let j = i + 1; j < indicadores.length; j++) {
-      if (indicadores[j].nivel <= ind.nivel) break;
-      if (indicadores[j].nivel === ind.nivel + 1) {
-        total += valores.get(indicadores[j].id) ?? 0;
-      }
-    }
-    valores.set(ind.id, total);
-  }
-
-  for (const ind of indicadores) {
-    if (ind.tipo !== "SUBTOTAL" || !Array.isArray(ind.formula) || ind.formula.length === 0) continue;
-    const total = (ind.formula as FormulaItem[]).reduce(
-      (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0),
-      0
-    );
-    valores.set(ind.id, total);
-  }
-
-  return valores;
+function getFormulaBlocos(formula: unknown): FormulaBloco[] {
+  if (!Array.isArray(formula) || formula.length === 0) return [];
+  if ((formula[0] as FormulaItem).subtotalId !== undefined)
+    return [{ id: "__v1__", sinal: "+", items: formula as FormulaItem[] }];
+  return formula as FormulaBloco[];
 }
 
 function buildCategoriaMap(indicadores: IndicadorRow[]): Map<string, "ESTOQUE" | "MENSAL"> {
   const map = new Map<string, "ESTOQUE" | "MENSAL">();
   for (const ind of indicadores) {
-    if (ind.tipo === "INDICADOR") {
+    if (ind.tipo === "INDICADOR")
       map.set(ind.id, ind.categoria === "ESTOQUE" ? "ESTOQUE" : "MENSAL");
-    }
   }
   for (let i = indicadores.length - 1; i >= 0; i--) {
     const ind = indicadores[i];
     if (ind.tipo !== "SUBTOTAL") continue;
-    const leaves = getIndicadorLeaves(ind, indicadores);
+    const leaves: IndicadorRow[] = [];
+    for (let j = i + 1; j < indicadores.length; j++) {
+      if (indicadores[j].nivel <= ind.nivel) break;
+      if (indicadores[j].tipo === "INDICADOR") leaves.push(indicadores[j]);
+    }
     map.set(ind.id, leaves.length > 0 && leaves.every(l => map.get(l.id) === "ESTOQUE") ? "ESTOQUE" : "MENSAL");
   }
   return map;
+}
+
+// Compute one month's values from the orcamento map instead of lançamentos
+function computePeriodOrcado(
+  indicadores: IndicadorRow[],
+  orcadoValores: Map<string, Map<string, number>>,
+  periodo: string,
+  prevValores?: Map<string, number>
+): Map<string, number> {
+  const valores = new Map<string, number>();
+
+  // Leaf indicators: read directly from orçamento map
+  for (const ind of indicadores) {
+    if (ind.tipo !== "INDICADOR") continue;
+    valores.set(ind.id, orcadoValores.get(ind.id)?.get(periodo) ?? 0);
+  }
+
+  // SUBTOTALs without formula: sum direct children
+  for (let i = indicadores.length - 1; i >= 0; i--) {
+    const ind = indicadores[i];
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
+    let total = 0;
+    for (let j = i + 1; j < indicadores.length; j++) {
+      if (indicadores[j].nivel <= ind.nivel) break;
+      if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
+    }
+    valores.set(ind.id, total);
+  }
+
+  // SUBTOTALs with formula
+  for (const ind of indicadores) {
+    const blocos = getFormulaBlocos(ind.formula);
+    if (ind.tipo !== "SUBTOTAL" || blocos.length === 0) continue;
+    const total = blocos.reduce((sum, bloco) => {
+      const blocoVal = bloco.items.reduce(
+        (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0), 0
+      );
+      return sum + (bloco.sinal === "+" ? 1 : -1) * blocoVal;
+    }, 0);
+    valores.set(ind.id, total);
+  }
+
+  // Acumulado
+  if (prevValores) {
+    for (const ind of indicadores) {
+      if (!ind.acumulado) continue;
+      valores.set(ind.id, (valores.get(ind.id) ?? 0) + (prevValores.get(ind.id) ?? 0));
+    }
+  }
+
+  return valores;
 }
 
 function aggregatePeriods(
@@ -221,49 +185,65 @@ function aggregatePeriods(
   categoriaMap: Map<string, "ESTOQUE" | "MENSAL">
 ): Map<string, number> {
   const valores = new Map<string, number>();
+  const lastMi = meses[meses.length - 1];
+
+  // Step 1: leaf INDICADORs — ESTOQUE takes last month, MENSAL sums
   for (const ind of indicadores) {
+    if (ind.tipo !== "INDICADOR") continue;
+    valores.set(ind.id,
+      categoriaMap.get(ind.id) === "ESTOQUE"
+        ? (monthly[lastMi].get(ind.id) ?? 0)
+        : meses.reduce((s, mi) => s + (monthly[mi].get(ind.id) ?? 0), 0)
+    );
+  }
+
+  // Step 2: SUBTOTALs without formula — bottom-up, use already-aggregated children
+  for (let i = indicadores.length - 1; i >= 0; i--) {
+    const ind = indicadores[i];
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
     if (categoriaMap.get(ind.id) === "ESTOQUE") {
-      const lastMi = meses[meses.length - 1];
       valores.set(ind.id, monthly[lastMi].get(ind.id) ?? 0);
     } else {
-      valores.set(ind.id, meses.reduce((s, mi) => s + (monthly[mi].get(ind.id) ?? 0), 0));
-    }
-  }
-  return valores;
-}
-
-function getLancamentosForIndicador(
-  node: IndicadorRow,
-  all: IndicadorRow[],
-  lans: LancamentoIndicador[]
-): LancamentoIndicador[] {
-  const leaves = getIndicadorLeaves(node, all);
-  if (leaves.length === 0) return [];
-
-  const counted = new Set<number>();
-  const result: LancamentoIndicador[] = [];
-
-  for (const leaf of leaves) {
-    if (!leaf.fontes || leaf.fontes.length === 0) continue;
-    const implicitRegra: RegraItem | undefined = leaf.codigo
-      ? { modo: "especifico", codEspecifico: leaf.codigo }
-      : undefined;
-    for (const fonte of leaf.fontes) {
-      const regra = (fonte.codIndicador && fonte.codIndicador.modo !== "none")
-        ? fonte.codIndicador
-        : implicitRegra;
-      if (!regra) continue;
-      for (let i = 0; i < lans.length; i++) {
-        if (counted.has(i)) continue;
-        const l = lans[i];
-        if (!matchesRegra(l.cod_indicador, regra)) continue;
-        counted.add(i);
-        result.push(l);
+      let total = 0;
+      for (let j = i + 1; j < indicadores.length; j++) {
+        if (indicadores[j].nivel <= ind.nivel) break;
+        if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
       }
+      valores.set(ind.id, total);
     }
   }
 
-  return result;
+  // Step 3: formula-based SUBTOTALs — apply formula to aggregated values
+  for (const ind of indicadores) {
+    const blocos = getFormulaBlocos(ind.formula);
+    if (ind.tipo !== "SUBTOTAL" || blocos.length === 0) continue;
+    if (categoriaMap.get(ind.id) === "ESTOQUE") {
+      valores.set(ind.id, monthly[lastMi].get(ind.id) ?? 0);
+    } else {
+      const total = blocos.reduce((sum, bloco) => {
+        const blocoVal = bloco.items.reduce(
+          (s, fi) => s + (fi.sinal === "+" ? 1 : -1) * (valores.get(fi.subtotalId) ?? 0), 0
+        );
+        return sum + (bloco.sinal === "+" ? 1 : -1) * blocoVal;
+      }, 0);
+      valores.set(ind.id, total);
+    }
+  }
+
+  // Step 4: re-run non-formula SUBTOTALs so parents of formula-SUBTOTALs pick up Step 3 values
+  for (let i = indicadores.length - 1; i >= 0; i--) {
+    const ind = indicadores[i];
+    if (ind.tipo !== "SUBTOTAL" || getFormulaBlocos(ind.formula).length > 0) continue;
+    if (categoriaMap.get(ind.id) === "ESTOQUE") continue;
+    let total = 0;
+    for (let j = i + 1; j < indicadores.length; j++) {
+      if (indicadores[j].nivel <= ind.nivel) break;
+      if (indicadores[j].nivel === ind.nivel + 1) total += valores.get(indicadores[j].id) ?? 0;
+    }
+    valores.set(ind.id, total);
+  }
+
+  return valores;
 }
 
 function getRowStyle(tipo: IndicadorTipo, nivel: number) {
@@ -279,58 +259,111 @@ function getRowStyle(tipo: IndicadorTipo, nivel: number) {
 
 export default function IndicadoresOrcadoPage() {
   const [indicadores] = usePersistedData<IndicadorRow[]>("portal_indicadores", []);
-  const [lancamentos] = usePersistedData<LancamentoIndicador[]>("portal_lancamentos_indicadores", []);
+
+  // All 14 orçamento blobs
+  const [orcGestao]     = usePersistedData<Bloco[]>("portal_orcamento_gestao_recursos", []);
+  const [orcIB]         = usePersistedData<Bloco[]>("portal_orcamento_investment_banking", []);
+  const [orcAdvisory]   = usePersistedData<Bloco[]>("portal_orcamento_advisory", []);
+  const [orcResearch]   = usePersistedData<Bloco[]>("portal_orcamento_research", []);
+  const [orcPessoal]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_pessoal", []);
+  const [orcCert]       = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_certificacao", []);
+  const [orcIncentivos] = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_incentivos_comerciais", []);
+  const [orcInst]       = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_institucional", []);
+  const [orcOcupacao]   = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_ocupacao", []);
+  const [orcEventos]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_eventos", []);
+  const [orcServEsp]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_servicos_especializados", []);
+  const [orcServJur]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_servicos_juridicos", []);
+  const [orcTec]        = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_tecnologia", []);
+  const [orcViagens]    = usePersistedData<Bloco[]>("portal_orcamento_gastos_pacote_viagens", []);
 
   const [collapsed,  setCollapsed]  = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
   const [filtros,    setFiltros]    = usePersistedData<Filtros>("portal_ind_filtros_orcado", filtrosVazios);
   const [rascunho,   setRascunho]   = useState<Filtros>(filtrosVazios);
 
-  const [detalhe,     setDetalhe]     = useState<{ row: IndicadorRow; lans: LancamentoIndicador[] } | null>(null);
-  const [periodosSel, setPeriodosSel] = useState<Set<string>>(new Set());
+  // Build indicadorId → (YYYY-MM → value) from all orçamento blobs.
+  // Handles both "digitado" (stored values) and "calculado" (formula-evaluated) indicator lines.
+  const orcadoValores = useMemo(() => {
+    const allBlocos: Bloco[] = [
+      ...orcGestao, ...orcIB, ...orcAdvisory, ...orcResearch,
+      ...orcPessoal, ...orcCert, ...orcIncentivos, ...orcInst,
+      ...orcOcupacao, ...orcEventos, ...orcServEsp, ...orcServJur,
+      ...orcTec, ...orcViagens,
+    ];
+    const map = new Map<string, Map<string, number>>();
 
-  // Filter to orcado lancamentos only
-  const lancamentosOrcado = useMemo(
-    () => lancamentos.filter(l => l.tipo === "orcado"),
-    [lancamentos]
-  );
+    for (const bloco of allBlocos) {
+      for (const sub of (bloco.subBlocos ?? [])) {
+        const todas = sub.linhas ?? [];
+        const allLinhasMap = new Map<string, LinhaEval>(todas.map(l => [l.id, l as LinhaEval]));
 
-  const lancamentosPorPeriodo = useMemo(() => {
-    const map = new Map<string, LancamentoIndicador[]>();
-    for (const l of lancamentosOrcado) {
-      const bucket = map.get(l.periodo);
-      if (bucket) bucket.push(l);
-      else map.set(l.periodo, [l]);
+        for (const linha of todas) {
+          if (linha.categoria !== "indicador" || !linha.codIndicador) continue;
+
+          if (!map.has(linha.codIndicador)) map.set(linha.codIndicador, new Map());
+          const indMap = map.get(linha.codIndicador)!;
+
+          if (linha.tipo === "digitado") {
+            const src = (linha.composicao && linha.composicao.length > 0)
+              ? linha.composicao.reduce((acc, item) => {
+                  for (const [k, v] of Object.entries(item.valores))
+                    acc[k] = (acc[k] ?? 0) + v;
+                  return acc;
+                }, {} as Record<string, number>)
+              : linha.valores;
+            for (const [k, v] of Object.entries(src)) {
+              if (v !== 0) indMap.set(k, (indMap.get(k) ?? 0) + v);
+            }
+          } else if (linha.tipo === "calculado") {
+            // Infer year from any sibling digitado line that has stored values.
+            let ano = new Date().getFullYear();
+            for (const l of todas) {
+              const k = Object.keys(l.valores)[0];
+              if (k && k.length >= 4) { ano = parseInt(k.slice(0, 4)); break; }
+            }
+            for (let mi = 0; mi < 12; mi++) {
+              const v = evalLinha(linha as LinhaEval, todas as LinhaEval[], ano, mi, allLinhasMap);
+              if (v !== 0) indMap.set(pk(ano, mi), (indMap.get(pk(ano, mi)) ?? 0) + v);
+            }
+          }
+        }
+      }
     }
     return map;
-  }, [lancamentosOrcado]);
+  }, [orcGestao, orcIB, orcAdvisory, orcResearch, orcPessoal, orcCert, orcIncentivos,
+      orcInst, orcOcupacao, orcEventos, orcServEsp, orcServJur, orcTec, orcViagens]);
 
-  const lancamentosPeriodo = useMemo(() => {
-    const { periodoInicio, periodoFim } = filtros;
-    return lancamentosOrcado.filter(l => l.periodo >= periodoInicio && l.periodo <= periodoFim);
-  }, [lancamentosOrcado, filtros]);
+  // Set of indicator ids marked as percentual in any orçamento linha
+  const percentualSet = useMemo(() => {
+    const s = new Set<string>();
+    const allBlocos: Bloco[] = [
+      ...orcGestao, ...orcIB, ...orcAdvisory, ...orcResearch,
+      ...orcPessoal, ...orcCert, ...orcIncentivos, ...orcInst,
+      ...orcOcupacao, ...orcEventos, ...orcServEsp, ...orcServJur,
+      ...orcTec, ...orcViagens,
+    ];
+    for (const bloco of allBlocos)
+      for (const sub of (bloco.subBlocos ?? []))
+        for (const linha of (sub.linhas ?? []))
+          if (linha.categoria === "indicador" && linha.codIndicador && linha.isPercentual)
+            s.add(linha.codIndicador);
+    return s;
+  }, [orcGestao, orcIB, orcAdvisory, orcResearch, orcPessoal, orcCert, orcIncentivos,
+      orcInst, orcOcupacao, orcEventos, orcServEsp, orcServJur, orcTec, orcViagens]);
+
+  const categoriaMap = useMemo(() => buildCategoriaMap(indicadores), [indicadores]);
 
   const valoresPorMes = useMemo(() => {
     const { periodoInicio, periodoFim } = filtros;
     const ano = periodoInicio.slice(0, 4);
-    return MESES.map((_, mi) => {
+    const maps: Map<string, number>[] = [];
+    MESES.forEach((_, mi) => {
       const p = `${ano}-${String(mi + 1).padStart(2, "0")}`;
-      if (p < periodoInicio || p > periodoFim) return new Map<string, number>();
-      return computePeriodIndicadores(indicadores, lancamentosPorPeriodo.get(p) ?? []);
+      if (p < periodoInicio || p > periodoFim) { maps.push(new Map()); return; }
+      maps.push(computePeriodOrcado(indicadores, orcadoValores, p, maps[mi - 1]));
     });
-  }, [indicadores, lancamentosPorPeriodo, filtros]);
-
-  const categoriaMap = useMemo(() => buildCategoriaMap(indicadores), [indicadores]);
-
-  const unidadeMap = useMemo(() => {
-    const map = new Map<string, "valor" | "percentual">();
-    for (const ind of indicadores) {
-      if (ind.tipo !== "INDICADOR") continue;
-      const lans = getLancamentosForIndicador(ind, indicadores, lancamentosPeriodo);
-      map.set(ind.id, isPercentual(lans) ? "percentual" : "valor");
-    }
-    return map;
-  }, [indicadores, lancamentosPeriodo]);
+    return maps;
+  }, [indicadores, orcadoValores, filtros]);
 
   const colunas = useMemo<{ label: string; sublabel?: string; valores: Map<string, number> }[]>(() => {
     const { viewMode, periodoInicio, periodoFim } = filtros;
@@ -377,52 +410,7 @@ export default function IndicadoresOrcadoPage() {
     return n;
   }, [filtros]);
 
-  const detalhePeriodos = useMemo(() =>
-    detalhe ? [...new Set(detalhe.lans.map(l => l.periodo))].sort() : [],
-    [detalhe]
-  );
-
-  const detalheGrupos = useMemo(() => {
-    if (!detalhe) return [];
-    const sorted = [...detalhe.lans]
-      .filter(l => periodosSel.has(l.periodo))
-      .sort((a, b) => a.periodo.localeCompare(b.periodo) || a.data.localeCompare(b.data));
-    const grupos: { periodo: string; lans: LancamentoIndicador[] }[] = [];
-    for (const l of sorted) {
-      const last = grupos[grupos.length - 1];
-      if (last && last.periodo === l.periodo) last.lans.push(l);
-      else grupos.push({ periodo: l.periodo, lans: [l] });
-    }
-    return grupos;
-  }, [detalhe, periodosSel]);
-
-  const detalheTotal = useMemo(() =>
-    detalheGrupos.reduce((s, g) => s + g.lans.reduce((ss, l) => ss + l.valor, 0), 0),
-    [detalheGrupos]
-  );
-
-  function openDetalhe(row: IndicadorRow) {
-    const lans = getLancamentosForIndicador(row, indicadores, lancamentosPeriodo);
-    setDetalhe({ row, lans });
-    setPeriodosSel(new Set(lans.map(l => l.periodo)));
-  }
-
-  function exportarDetalhe() {
-    if (!detalhe) return;
-    const rows = detalheGrupos.flatMap(g =>
-      g.lans.map(l => ({
-        Data:      fmtDate(l.data),
-        Período:   fmtPeriodo(l.periodo),
-        Indicador: l.cod_indicador,
-        Unidade:   l.unidade === "percentual" ? "%" : "R$",
-        Valor:     l.valor,
-      }))
-    );
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, detalhe.row.nome.slice(0, 31));
-    XLSX.writeFile(wb, `Indicadores_Orcado_${detalhe.row.nome.replace(/[/\\?*[\]]/g, "_")}.xlsx`);
-  }
+  const hasData = orcadoValores.size > 0;
 
   function toggleCollapse(id: string) {
     setCollapsed(prev => {
@@ -435,6 +423,18 @@ export default function IndicadoresOrcadoPage() {
   function aplicar()    { setFiltros(rascunho); setFilterOpen(false); }
   function limparTudo() { setRascunho(filtrosVazios); }
 
+  function exportarExcel() {
+    const rows = visibleData.map(({ row }) => {
+      const r: Record<string, unknown> = { Indicador: row.nome };
+      colunas.forEach(c => { r[c.label] = c.valores.get(row.id) ?? 0; });
+      return r;
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Orçado");
+    XLSX.writeFile(wb, `Indicadores_Orcado_${filtros.periodoInicio.slice(0, 4)}.xlsx`);
+  }
+
   const anoAtivo     = filtros.periodoInicio.slice(0, 4);
   const viewMode     = filtros.viewMode;
   const mIni         = parseInt(filtros.periodoInicio.split("-")[1]) - 1;
@@ -442,8 +442,7 @@ export default function IndicadoresOrcadoPage() {
   const periodoLabel = mIni === 0 && mFim === 11
     ? anoAtivo
     : `${MESES[mIni]}–${MESES[mFim]} ${anoAtivo}`;
-  const subtitle     = `Orçado · ${periodoLabel}`;
-  const totalLans    = lancamentosOrcado.filter(l => l.periodo.startsWith(anoAtivo)).length;
+  const subtitle = `Orçado · ${periodoLabel}`;
 
   if (indicadores.length === 0) {
     return (
@@ -463,10 +462,10 @@ export default function IndicadoresOrcadoPage() {
     <div>
       <PageHeader title="Indicadores" subtitle={subtitle} />
 
-      <div className="p-6 space-y-4">
+      <div className="p-6 space-y-4 min-w-max">
 
-        {/* ── Controles ────────────────────────────────────────────────────────── */}
-        <div className="flex items-center gap-3 flex-wrap">
+        {/* ── Controles ──────────────────────────────────────────────────────── */}
+        <div className="flex items-center gap-3">
           <button
             onClick={() => { setRascunho(filtros); setFilterOpen(true); }}
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors"
@@ -482,21 +481,28 @@ export default function IndicadoresOrcadoPage() {
             )}
           </button>
 
+          <button
+            onClick={exportarExcel}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 transition-colors text-gray-600">
+            <Download size={14} />
+            Exportar Excel
+          </button>
+
           <span className="ml-auto text-xs text-gray-400">
-            {totalLans.toLocaleString("pt-BR")} lançamentos · {VIEW_LABELS[viewMode]} · {periodoLabel}
+            {VIEW_LABELS[viewMode]} · {periodoLabel}
           </span>
         </div>
 
-        {/* ── Tabela pivô ──────────────────────────────────────────────────────── */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+        {/* ── Tabela pivô ────────────────────────────────────────────────────── */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+          <div className="px-5 py-3 border-b border-gray-100">
             <span className="font-semibold text-gray-800 text-sm">
               Indicadores · Orçado ·{" "}
               <span className="font-normal text-gray-500">{VIEW_LABELS[viewMode]} · {periodoLabel}</span>
             </span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div>
             <table className="text-sm border-collapse" style={{ minWidth: "max-content", width: "100%" }}>
               <thead>
                 {viewMode === "trimestral" && (
@@ -534,17 +540,24 @@ export default function IndicadoresOrcadoPage() {
 
               <tbody>
                 {visibleData.map(({ row, dataIdx }) => {
-                  const hasFilhos = (() => { for (let i = dataIdx + 1; i < indicadores.length; i++) { if (indicadores[i].nivel <= row.nivel) return false; return true; } return false; })();
+                  const hasFilhos = (() => {
+                    for (let i = dataIdx + 1; i < indicadores.length; i++) {
+                      if (indicadores[i].nivel <= row.nivel) return false;
+                      return true;
+                    }
+                    return false;
+                  })();
                   const effectiveTipo: IndicadorTipo = hasFilhos ? "SUBTOTAL" : row.tipo;
-                  const s           = getRowStyle(effectiveTipo, row.nivel);
-                  const isCollapse  = hasFilhos;
+                  const s          = getRowStyle(effectiveTipo, row.nivel);
+                  const isCollapse = hasFilhos;
                   const isCollapsed = isCollapse && collapsed.has(row.id);
+                  const pct = percentualSet.has(row.id);
 
                   return (
                     <tr key={row.id}
                       style={{ background: s.bg, color: s.color, fontWeight: s.fw }}
-                      className="border-b border-gray-100 cursor-pointer hover:brightness-95 transition-all"
-                      onClick={() => isCollapse ? toggleCollapse(row.id) : openDetalhe(row)}>
+                      className={`border-b border-gray-100 transition-all${isCollapse ? " cursor-pointer hover:brightness-95" : ""}`}
+                      onClick={() => isCollapse ? toggleCollapse(row.id) : undefined}>
 
                       <td className="px-4 py-2.5 sticky left-0 z-10" style={{ background: s.bg }}>
                         <span className="flex items-center gap-1" style={{ paddingLeft: `${(row.nivel - 1) * 16}px` }}>
@@ -564,7 +577,6 @@ export default function IndicadoresOrcadoPage() {
                       {colunas.map((c, ci) => {
                         const v   = c.valores.get(row.id) ?? 0;
                         const sep = viewMode === "trimestral" && ci > 0;
-                        const pct = unidadeMap.get(row.id) === "percentual";
                         return (
                           <td key={ci}
                             className={`px-3 py-2.5 text-right tabular-nums whitespace-nowrap${sep ? " border-l border-gray-100" : ""}`}>
@@ -578,15 +590,15 @@ export default function IndicadoresOrcadoPage() {
                   );
                 })}
 
-                {visibleData.length === 0 && lancamentosPeriodo.length === 0 && (
+                {!hasData && (
                   <tr>
                     <td colSpan={2 + colunas.length} className="px-4 py-12 text-center text-gray-400 text-sm">
-                      Nenhum lançamento de indicadores orçados no período.
+                      Nenhum valor orçado encontrado. Configure em Orçamento e vincule linhas a indicadores.
                     </td>
                   </tr>
                 )}
 
-                {visibleData.length === 0 && lancamentosPeriodo.length > 0 && (
+                {hasData && visibleData.length === 0 && (
                   <tr>
                     <td colSpan={2 + colunas.length} className="px-4 py-12 text-center text-gray-400 text-sm">
                       Nenhuma linha com valor.{" "}
@@ -603,118 +615,6 @@ export default function IndicadoresOrcadoPage() {
           </div>
         </div>
       </div>
-
-      {/* ── Modal de detalhamento ────────────────────────────────────────────── */}
-      {detalhe && (
-        <>
-          <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setDetalhe(null)} />
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-[96vw] max-h-[88vh] flex flex-col">
-
-              <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-200 flex-shrink-0">
-                <p className="font-semibold text-gray-800">{detalhe.row.nome}</p>
-                <button onClick={() => setDetalhe(null)}
-                  className="text-gray-400 hover:text-gray-600 transition-colors text-lg leading-none">✕</button>
-              </div>
-
-              <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50 flex-shrink-0 flex-wrap">
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Período</span>
-                <div className="flex items-center gap-1.5 flex-wrap flex-1">
-                  {detalhePeriodos.map(p => {
-                    const sel = periodosSel.has(p);
-                    return (
-                      <button key={p}
-                        onClick={() => setPeriodosSel(prev => {
-                          const n = new Set(prev);
-                          sel ? n.delete(p) : n.add(p);
-                          return n;
-                        })}
-                        className="px-2.5 py-1 rounded-full text-xs font-medium transition-all border"
-                        style={sel
-                          ? { background: "#1e3a5f", color: "white",   borderColor: "#1e3a5f" }
-                          : { background: "white",   color: "#64748b", borderColor: "#e2e8f0" }}>
-                        {fmtPeriodo(p)}
-                      </button>
-                    );
-                  })}
-                  {detalhePeriodos.length > 1 && (
-                    <button
-                      onClick={() => setPeriodosSel(
-                        periodosSel.size === detalhePeriodos.length
-                          ? new Set()
-                          : new Set(detalhePeriodos)
-                      )}
-                      className="text-[11px] text-blue-600 hover:underline ml-1">
-                      {periodosSel.size === detalhePeriodos.length ? "Desmarcar todos" : "Selecionar todos"}
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-4 flex-shrink-0 border-l border-gray-200 pl-4">
-                  <div className="text-right">
-                    <p className="text-[10px] text-gray-400 uppercase tracking-wide">Lançamentos</p>
-                    <p className="text-sm font-semibold text-gray-700 tabular-nums">
-                      {detalheGrupos.reduce((s, g) => s + g.lans.length, 0).toLocaleString("pt-BR")}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] text-gray-400 uppercase tracking-wide">Total</p>
-                    <p className={`text-sm font-bold tabular-nums${detalheTotal < 0 ? " text-red-600" : " text-gray-800"}`}>
-                      {fmtValor(detalheTotal, detalhe.lans.every(l => l.unidade === "percentual"))}
-                    </p>
-                  </div>
-                  <button onClick={exportarDetalhe}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 transition-colors whitespace-nowrap">
-                    <Download size={13} />
-                    Exportar Excel
-                  </button>
-                </div>
-              </div>
-
-              <div className="overflow-auto flex-1">
-                <table className="text-sm w-full border-collapse">
-                  <thead className="sticky top-0">
-                    <tr style={{ background: "#1e3a5f" }}>
-                      {["Data","Período","Indicador","Valor"].map((h, i) => (
-                        <th key={i}
-                          className={`px-3 py-2.5 text-white/80 text-xs uppercase tracking-wide font-semibold whitespace-nowrap${i === 3 ? " text-right" : " text-left"}`}>
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detalheGrupos.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="px-4 py-10 text-center text-gray-400 text-sm">
-                          Nenhum lançamento para os períodos selecionados.
-                        </td>
-                      </tr>
-                    )}
-                    {detalheGrupos.map(g => (
-                      <React.Fragment key={g.periodo}>
-                        {g.lans.map((l, i) => (
-                          <tr key={`${g.periodo}-${i}`} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{fmtDate(l.data)}</td>
-                            <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{fmtPeriodo(l.periodo)}</td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.cod_indicador}</span>
-                            </td>
-                            <td className={`px-3 py-1.5 text-right tabular-nums whitespace-nowrap font-medium${l.valor < 0 ? " text-red-600" : " text-gray-800"}`}>
-                              {fmtValor(l.valor, l.unidade === "percentual")}
-                            </td>
-                          </tr>
-                        ))}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-            </div>
-          </div>
-        </>
-      )}
 
       {/* ── FilterDrawer ──────────────────────────────────────────────────────── */}
       {filterOpen && (

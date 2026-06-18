@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Plus, Trash2, Pencil, FileText, ChevronDown, ChevronRight, X, AlertTriangle, Settings2, GripVertical, Indent, Outdent } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
-import { loadData, usePersistedData } from "@/lib/storage";
+import { usePersistedData } from "@/lib/storage";
+import { repararOrcamentoContabilIds } from "@/lib/orcamentoData";
 import type { NaturezaRow, CentroResultadoRow } from "@/lib/mockData";
 
 type ItemTipo = "SUBTOTAL" | "CONTA";
-type Demonstrativo = "DRE" | "DFC";
+type Demonstrativo = "DRE" | "DFC" | "DRE_CONTABIL";
 type RegraMode = "none" | "especifico" | "intervalo" | "multiplo";
 type DropMode = "before" | "inside" | "after";
 
@@ -494,7 +495,9 @@ function ItemModal({ mode, aba, item, natOpts, crOpts, subtotais, onSave, onClos
         style={{ maxHeight: "90vh" }}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 flex-shrink-0">
           <h2 className="text-base font-semibold text-gray-800">
-            {mode === "add" ? `Adicionar linha — ${aba}` : "Editar linha"}
+            {mode === "add"
+              ? `Adicionar linha — ${aba === "DRE_CONTABIL" ? "DRE Contábil" : aba}`
+              : "Editar linha"}
           </h2>
           <button className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-600 transition-colors" onClick={onClose}>
             <X size={16} />
@@ -641,12 +644,41 @@ function ItemModal({ mode, aba, item, natOpts, crOpts, subtotais, onSave, onClos
   );
 }
 
+// ─── Cópia com remap de IDs (preserva referências de fórmula) ────────────────
+
+// Se existingContabil for fornecido, reutiliza os IDs na mesma posição (evita stale IDs no orçamento).
+// Somente gera novo ID quando a posição ainda não existe no contábil atual.
+function deepCopyWithNewIds(items: DemoItem[], existingContabil?: DemoItem[]): DemoItem[] {
+  const idMap = new Map<string, string>();
+  items.forEach((item, i) => {
+    const reuseId = existingContabil?.[i]?.id;
+    idMap.set(item.id, reuseId ?? `dc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+  });
+  return items.map(item => ({
+    ...item,
+    id: idMap.get(item.id)!,
+    formula: item.formula?.map(fi => ({ ...fi, subtotalId: idMap.get(fi.subtotalId) ?? fi.subtotalId })),
+  }));
+}
+
 // ─── Página principal ─────────────────────────────────────────────────────────
 
 export default function DemonstrativosPage() {
-  const [aba, setAba]         = useState<Demonstrativo>("DRE");
-  const [dre, setDre]         = usePersistedData<DemoItem[]>("portal_dre", dreInicial);
-  const [dfc, setDfc]         = usePersistedData<DemoItem[]>("portal_dfc", dfcInicial);
+  const [aba, setAba]              = useState<Demonstrativo>("DRE");
+  const [dre, setDre]              = usePersistedData<DemoItem[]>("portal_dre", dreInicial);
+  const [dfc, setDfc]              = usePersistedData<DemoItem[]>("portal_dfc", dfcInicial);
+  const [dreContabil, setDreContabil] = usePersistedData<DemoItem[]>("portal_dre_contabil", dreInicial);
+
+  // Seed automático: se DRE Contábil nunca foi salvo, copia da DRE Gerencial
+  const [seeded, setSeeded] = useState(false);
+  useEffect(() => {
+    if (seeded) return;
+    setSeeded(true);
+    if (!localStorage.getItem("portal_dre_contabil") && dre.length > 0) {
+      setDreContabil(deepCopyWithNewIds(dre));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dre]);
   const [modal, setModal]     = useState<{ open: boolean; mode: "add" | "edit"; item: Partial<DemoItem> } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -656,19 +688,21 @@ export default function DemonstrativosPage() {
   const [overIdx, setOverIdx]   = useState<number | null>(null);
   const [overMode, setOverMode] = useState<DropMode>("after");
 
-  const data    = aba === "DRE" ? dre : dfc;
-  const setData = aba === "DRE" ? setDre : setDfc;
+  const data    = aba === "DRE" ? dre : aba === "DFC" ? dfc : dreContabil;
+  const setData = aba === "DRE" ? setDre : aba === "DFC" ? setDfc : setDreContabil;
 
-  const natData = useMemo(() => loadData<NaturezaRow[]>("portal_natureza", []), []);
-  const crData  = useMemo(() => loadData<CentroResultadoRow[]>("portal_centro_resultado", []), []);
+  const [natData] = usePersistedData<NaturezaRow[]>("portal_natureza", []);
+  const [crData]  = usePersistedData<CentroResultadoRow[]>("portal_centro_resultado", []);
 
+  // Para configuração de DRE, mostrar TODAS as naturezas/CRs independente de ATIVA/ATIVO.
+  // Naturezas inativas no ERP (ATIVA="N") ainda podem ter dados históricos e precisam de regras.
   const natOpts = useMemo<AccountOption[]>(() =>
     [...natData].sort((a, b) => a.CODNAT.localeCompare(b.CODNAT, undefined, { numeric: true, sensitivity: "base" }))
-      .map(r => ({ cod: r.CODNAT, descr: r.DESCRNAT, grau: r.GRAU, analitico: r.ANALITICA ?? false, ativo: r.ATIVA !== false, classificacao: r.CLASSIFICACAO || undefined })), [natData]);
+      .map(r => ({ cod: r.CODNAT, descr: r.DESCRNAT, grau: r.GRAU, analitico: r.ANALITICA ?? false, ativo: true, classificacao: r.CLASSIFICACAO || undefined })), [natData]);
 
   const crOpts = useMemo<AccountOption[]>(() =>
     [...crData].sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" }))
-      .map(r => ({ cod: r.CODCENCUS, descr: r.DESCRCENCUS, grau: r.GRAU, analitico: r.ANALITICO ?? false, ativo: r.ATIVO !== false, classificacao: r.CLASSIFICACAO || undefined })), [crData]);
+      .map(r => ({ cod: r.CODCENCUS, descr: r.DESCRCENCUS, grau: r.GRAU, analitico: r.ANALITICO ?? false, ativo: true, classificacao: r.CLASSIFICACAO || undefined })), [crData]);
 
   const codes = useMemo(() => computeCodes(data), [data]);
 
@@ -842,11 +876,35 @@ export default function DemonstrativosPage() {
   function clearDrag() { setDragIdx(null); setOverIdx(null); }
   function handleDragEnd() { clearDrag(); }
 
+
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader title="Demonstrativos" subtitle="Estrutura do plano de contas e hierarquias">
+        {aba === "DRE_CONTABIL" && (
+          <>
+            <button
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+              onClick={() => {
+                if (dre.length === 0) return alert("Nenhum item na DRE para copiar.");
+                if (!confirm(`Isso substituirá os ${data.length} itens atuais da DRE Contábil pelos ${dre.length} itens da DRE. Continuar?`)) return;
+                setDreContabil(deepCopyWithNewIds(dre, dreContabil));
+              }}
+            >
+              <FileText size={14} /> Copiar da DRE
+            </button>
+            <button
+              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors"
+              onClick={() => {
+                const { reparadas, ignoradas } = repararOrcamentoContabilIds();
+                alert(`Reparo concluído:\n• ${reparadas} mapeamento(s) corrigido(s)\n• ${ignoradas} sem resolução (configure manualmente no orçamento)`);
+              }}
+            >
+              <Settings2 size={14} /> Corrigir IDs do Orçamento
+            </button>
+          </>
+        )}
         <button
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors"
           style={{ background: "#1e3a5f" }}
@@ -858,26 +916,32 @@ export default function DemonstrativosPage() {
 
       {/* Abas */}
       <div className="flex gap-0 border-b border-slate-200 bg-white px-6">
-        {(["DRE", "DFC"] as Demonstrativo[]).map(d => (
+        {([
+          ["DRE",         "DRE - Gerencial"],
+          ["DFC",         "Fluxo de Caixa (DFC)"],
+          ["DRE_CONTABIL","DRE - Contábil"],
+        ] as [Demonstrativo, string][]).map(([d, label]) => (
           <button key={d}
             className={`flex items-center gap-2 px-5 py-3 text-sm font-semibold border-b-2 transition-colors ${
               aba === d ? "border-[#1e3a5f] text-[#1e3a5f]" : "border-transparent text-slate-500 hover:text-slate-700"
             }`}
             onClick={() => setAba(d)}>
             <FileText size={14} />
-            {d === "DRE" ? "Demonstração do Resultado (DRE)" : "Fluxo de Caixa (DFC)"}
+            {label}
           </button>
         ))}
       </div>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col flex-1 min-h-0">
 
           {/* Cabeçalho */}
           <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 flex-wrap gap-3">
             <div>
               <span className="font-semibold text-gray-800 text-sm">
-                {aba === "DRE" ? "Demonstração do Resultado do Exercício" : "Demonstração do Fluxo de Caixa"}
+                {aba === "DRE" ? "Demonstração do Resultado do Exercício Gerencial"
+                  : aba === "DFC" ? "Demonstração do Fluxo de Caixa"
+                  : "Demonstração do Resultado do Exercício (DRE) Contábil"}
               </span>
               <span className="ml-3 text-xs text-gray-400">{data.length} linhas</span>
             </div>
@@ -898,7 +962,7 @@ export default function DemonstrativosPage() {
           </div>
 
           {/* Tabela */}
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm border-collapse">
               <thead>
                 <tr style={{ background: "#1e3a5f" }}>
@@ -968,7 +1032,7 @@ export default function DemonstrativosPage() {
 
                       {/* Descrição + toggle */}
                       <td className="px-3 py-2">
-                        <span className="flex items-center gap-1.5" style={{ paddingLeft: `${(row.nivel - 1) * 18}px` }}>
+                        <span className="flex items-center gap-1.5 uppercase" style={{ paddingLeft: `${(row.nivel - 1) * 18}px` }}>
                           {isSubtotal ? (
                             <span className="flex-shrink-0 rounded p-0.5"
                               style={{ color: isOnDark ? "rgba(255,255,255,0.7)" : "#1e3a5f" }}>
@@ -1069,7 +1133,7 @@ export default function DemonstrativosPage() {
         </div>
       </div>
 
-      {modal?.open && (
+{modal?.open && (
         <ItemModal mode={modal.mode} aba={aba} item={modal.item}
           natOpts={natOpts} crOpts={crOpts} subtotais={subtotaisParaFormula}
           onSave={handleSave} onClose={() => setModal(null)} />

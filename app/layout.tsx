@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
 
 export const metadata: Metadata = {
   title: "Portal Controladoria | Apex",
@@ -14,13 +14,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR" className="h-full">
+      <head>
+        <link rel="icon" href="/favicon-apex.svg" type="image/svg+xml" />
+      </head>
       <body className="h-full overflow-hidden flex" style={{ background: "#f1f5f9" }} suppressHydrationWarning>
-        <Sidebar />
-        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          <main className="flex-1 overflow-auto">
-            {children}
-          </main>
-        </div>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

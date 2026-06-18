@@ -5,6 +5,8 @@ import { Plus, Pencil, Trash2, RefreshCw, Search, X, Filter } from "lucide-react
 import { FilterSection, FilterCheckbox, FilterDrawerShell } from "@/components/FilterAccordion";
 import PageHeader from "@/components/PageHeader";
 import { centroResultadoDataInicial, type CentroResultadoRow, type TipoRegistro } from "@/lib/mockData";
+
+interface PoloRow { id: string; POLO: string; ESTADO: string; CIDADE: string; DATA_CRIACAO: string; DATA_INATIVO: string; }
 import { buildHierarchy } from "@/lib/utils";
 import { loadConfig, loadSession, sankhyaQuery, QUERIES } from "@/lib/sankhya";
 import { usePersistedData, markStorageInitialized } from "@/lib/storage";
@@ -13,7 +15,7 @@ const CLASSIFICACAO_OPTS = ["DESPESA", "CUSTO"];
 
 const empty: Omit<CentroResultadoRow, "id"> = {
   CODCENCUS: "", DESCRCENCUS: "", ATIVO: true, GRAU: 1, ANALITICO: true,
-  TIPO_REGISTRO: "GERENCIAL", ENTRA_RESULTADO: "DRE", CLASSIFICACAO: "",
+  TIPO_REGISTRO: "GERENCIAL", ENTRA_RESULTADO: "DRE", CLASSIFICACAO: "", CIDADE: "",
 };
 
 interface Filtros { tipo: string[]; grau: string[]; classificacao: string[]; ativo: string[]; analitico: string[]; }
@@ -34,6 +36,11 @@ const resultadoBadge = (v: string) =>
 
 export default function CentroResultadoPage() {
   const [data, setData] = usePersistedData<CentroResultadoRow[]>("portal_centro_resultado", centroResultadoDataInicial);
+  const [poloData] = usePersistedData<PoloRow[]>("portal_polo", []);
+  const cidadesDisponiveis = useMemo(() => {
+    const set = new Set(poloData.map(p => p.CIDADE).filter(Boolean));
+    return Array.from(set).sort();
+  }, [poloData]);
   const [search, setSearch] = useState("");
   const [filtros, setFiltros] = usePersistedData<Filtros>("portal_filtros_centro_resultado", filtrosVazios);
   const [rascunho, setRascunho] = useState<Filtros>(filtrosVazios);
@@ -50,6 +57,7 @@ export default function CentroResultadoPage() {
   const [batchValues, setBatchValues] = useState({
     ENTRA_RESULTADO: "DRE" as CentroResultadoRow["ENTRA_RESULTADO"],
     CLASSIFICACAO: "" as CentroResultadoRow["CLASSIFICACAO"],
+    CIDADE: "",
     ANALITICO: true,
     ATIVO: true,
   });
@@ -107,6 +115,7 @@ export default function CentroResultadoPage() {
       const patch: Partial<CentroResultadoRow> = {};
       if (batchFields.has("ENTRA_RESULTADO")) patch.ENTRA_RESULTADO = batchValues.ENTRA_RESULTADO;
       if (batchFields.has("CLASSIFICACAO")) patch.CLASSIFICACAO = batchValues.CLASSIFICACAO;
+      if (batchFields.has("CIDADE")) patch.CIDADE = batchValues.CIDADE;
       if (r.TIPO_REGISTRO === "GERENCIAL") {
         if (batchFields.has("ANALITICO")) patch.ANALITICO = batchValues.ANALITICO;
         if (batchFields.has("ATIVO")) patch.ATIVO = batchValues.ATIVO;
@@ -120,7 +129,7 @@ export default function CentroResultadoPage() {
 
   function openAdd() { setForm({ ...empty }); setEditId(null); setModalOpen(true); }
   function openEdit(row: CentroResultadoRow) {
-    setForm({ CODCENCUS: row.CODCENCUS, DESCRCENCUS: row.DESCRCENCUS, ATIVO: row.ATIVO, GRAU: row.GRAU, ANALITICO: row.ANALITICO, TIPO_REGISTRO: row.TIPO_REGISTRO, ENTRA_RESULTADO: row.ENTRA_RESULTADO, CLASSIFICACAO: row.CLASSIFICACAO });
+    setForm({ CODCENCUS: row.CODCENCUS, DESCRCENCUS: row.DESCRCENCUS, ATIVO: row.ATIVO, GRAU: row.GRAU, ANALITICO: row.ANALITICO, TIPO_REGISTRO: row.TIPO_REGISTRO, ENTRA_RESULTADO: row.ENTRA_RESULTADO, CLASSIFICACAO: row.CLASSIFICACAO, CIDADE: row.CIDADE ?? "" });
     setEditId(row.id);
     setModalOpen(true);
   }
@@ -137,13 +146,23 @@ export default function CentroResultadoPage() {
     try {
       markStorageInitialized();
       const { rows } = await sankhyaQuery(cfg, sess.bearerToken, QUERIES.CENTRO_RESULTADO);
-      const synced: CentroResultadoRow[] = rows.map((r, i) => ({
-        id: `sync_cr_${i}`, CODCENCUS: String(r.CODCENCUS ?? ""), DESCRCENCUS: String(r.DESCRCENCUS ?? ""),
-        ATIVO: r.ATIVO === "S" || r.ATIVO === true, GRAU: Number(r.GRAU ?? 1),
-        ANALITICO: r.ANALITICO === "S" || r.ANALITICO === true, TIPO_REGISTRO: "NATIVO" as TipoRegistro,
-        ENTRA_RESULTADO: "DRE", CLASSIFICACAO: "",
-      }));
-      setData((prev) => [...synced, ...prev.filter((r) => r.TIPO_REGISTRO === "GERENCIAL")]);
+      setData((prev) => {
+        const existingMap = new Map(prev.filter(r => r.TIPO_REGISTRO === "NATIVO").map(r => [r.CODCENCUS, r]));
+        const synced: CentroResultadoRow[] = rows.map((r, i) => {
+          const existing = existingMap.get(String(r.CODCENCUS ?? ""));
+          return {
+            id: existing?.id ?? `sync_cr_${i}`,
+            CODCENCUS: String(r.CODCENCUS ?? ""), DESCRCENCUS: String(r.DESCRCENCUS ?? ""),
+            ATIVO: r.ATIVO === "S" || r.ATIVO === true, GRAU: Number(r.GRAU ?? 1),
+            ANALITICO: r.ANALITICO === "S" || r.ANALITICO === true, TIPO_REGISTRO: "NATIVO" as TipoRegistro,
+            ENTRA_RESULTADO: existing?.ENTRA_RESULTADO ?? "DRE",
+            CLASSIFICACAO: existing?.CLASSIFICACAO ?? "",
+            CIDADE: existing?.CIDADE ?? "",
+            CODCENCUSPAI: r.CODCENCUSPAI ? String(r.CODCENCUSPAI) : undefined,
+          };
+        });
+        return [...synced, ...prev.filter(r => r.TIPO_REGISTRO === "GERENCIAL")];
+      });
     } catch (err) {
       alert(`Erro: ${err instanceof Error ? err.message : err}\n\nConfigure a integração em Configurações.`);
     }
@@ -185,7 +204,7 @@ export default function CentroResultadoPage() {
            : { background: "white", color: "#6b7280", borderColor: "#d1d5db" };
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader title="Centro de Resultado" subtitle={`Tabela TSICUS · ${data.length} registros`}>
         <button onClick={handleSync} disabled={syncing}
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
@@ -197,8 +216,8 @@ export default function CentroResultadoPage() {
         </button>
       </PageHeader>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col flex-1 min-h-0">
           <div className="flex items-center gap-2 p-4 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -214,7 +233,7 @@ export default function CentroResultadoPage() {
             <span className="text-xs text-gray-400 ml-auto">{filtered.length} de {data.length} registros</span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100" style={{ background: "#f8fafc" }}>
@@ -233,6 +252,7 @@ export default function CentroResultadoPage() {
                   <th className="text-center px-4 py-2 font-semibold text-gray-500 uppercase text-xs tracking-wide">ATIVO</th>
                   <th className="text-center px-4 py-2 font-semibold text-gray-500 uppercase text-xs tracking-wide">RESULTADO</th>
                   <th className="text-left px-4 py-2 font-semibold text-gray-500 uppercase text-xs tracking-wide">CLASSIFICAÇÃO</th>
+                  <th className="text-left px-4 py-2 font-semibold text-gray-500 uppercase text-xs tracking-wide">CIDADE</th>
                   <th className="text-center px-4 py-2 font-semibold text-gray-500 uppercase text-xs tracking-wide">AÇÕES</th>
                 </tr>
               </thead>
@@ -279,6 +299,7 @@ export default function CentroResultadoPage() {
                         </span>
                       </td>
                       <td className="px-4 py-1.5 text-xs opacity-80">{row.CLASSIFICACAO || "—"}</td>
+                      <td className="px-4 py-1.5 text-xs opacity-80">{row.CIDADE || "—"}</td>
                       <td className="px-4 py-1.5">
                         <div className="flex items-center justify-center gap-1">
                           <button onClick={() => selected.size > 1 ? setBatchOpen(true) : openEdit(row)} title={isNativo ? "Editar campos gerenciais" : "Editar"} className="p-1.5 hover:bg-blue-100 hover:text-blue-600 rounded-lg transition-colors"><Pencil size={14} /></button>
@@ -288,7 +309,7 @@ export default function CentroResultadoPage() {
                     </tr>
                   );
                 })}
-                {filtered.length === 0 && <tr><td colSpan={10 + maxGrau} className="px-4 py-8 text-center text-gray-400">Nenhum registro encontrado.</td></tr>}
+                {filtered.length === 0 && <tr><td colSpan={11 + maxGrau} className="px-4 py-8 text-center text-gray-400">Nenhum registro encontrado.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -344,6 +365,15 @@ export default function CentroResultadoPage() {
                   </select>
                 </div>
               </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cidade</label>
+                <select className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                  value={form.CIDADE ?? ""} onChange={(e) => setForm({ ...form, CIDADE: e.target.value })}>
+                  <option value="">— Selecione —</option>
+                  {cidadesDisponiveis.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                {cidadesDisponiveis.length === 0 && <p className="text-xs text-gray-400 mt-1">Nenhuma cidade cadastrada em Cadastros &gt; Polo.</p>}
+              </div>
               {!isNativoEdit && (
                 <div className="flex gap-4">
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -390,6 +420,13 @@ export default function CentroResultadoPage() {
                     value={batchValues.CLASSIFICACAO} onChange={(e) => setBatchValues(v => ({ ...v, CLASSIFICACAO: e.target.value as CentroResultadoRow["CLASSIFICACAO"] }))}>
                     <option value="">— Selecione —</option>
                     {CLASSIFICACAO_OPTS.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                )},
+                { key: "CIDADE", label: "Cidade", el: (
+                  <select disabled={!batchFields.has("CIDADE")} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none disabled:bg-gray-50 disabled:text-gray-400"
+                    value={batchValues.CIDADE} onChange={(e) => setBatchValues(v => ({ ...v, CIDADE: e.target.value }))}>
+                    <option value="">— Selecione —</option>
+                    {cidadesDisponiveis.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 )},
                 { key: "ANALITICO", label: "Analítico (somente GERENCIAL)", el: (

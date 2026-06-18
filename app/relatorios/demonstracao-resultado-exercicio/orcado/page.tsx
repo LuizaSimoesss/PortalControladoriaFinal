@@ -1,40 +1,38 @@
-"use client";
+﻿"use client";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import { ChevronDown, ChevronRight as ChevronRt, Filter, Download } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
-import { usePersistedData, loadData } from "@/lib/storage";
-import { idbGet } from "@/lib/idb";
-import type { LancamentoFinanceiro, Fechamento, NaturezaRow, CentroResultadoRow, EmpresaRow, ParceiroRow, ProjetoRow } from "@/lib/mockData";
+import { usePersistedData, loadData, prefetchKeys, PREFETCH_ORCADO_KEYS } from "@/lib/storage";
+import { buildHierarchy } from "@/lib/utils";
+import { buildOrcamentoMap, getOrcamentoAnos, buildOrcamentoDebug, buildOrcamentoCRDiag, OrcamentoCRDiagEntry } from "@/lib/orcamentoData";
+import { CentroResultadoRow } from "@/lib/mockData";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ItemTipo  = "SUBTOTAL" | "CONTA";
-type RegraMode = "none" | "especifico" | "intervalo" | "multiplo";
 type ViewMode  = "mensal" | "trimestral" | "quadrimestral" | "semestral";
 
-interface RegraItem   { modo: RegraMode; codEspecifico?: string; codDe?: string; codAte?: string; codMultiplos?: string[] }
-interface RegrasLinha { centroResultado?: RegraItem; natureza?: RegraItem }
 interface FormulaItem { subtotalId: string; sinal: "+" | "-" }
-
 interface DemoItem {
   id: string; nivel: number; tipo: ItemTipo; descricao: string;
-  regras?: RegrasLinha; formula?: FormulaItem[];
+  formula?: FormulaItem[];
 }
 
 interface PeriodResult { valores: Map<string, number>; naoAlocado: number }
 interface ColDRE       { label: string; sublabel?: string; result: PeriodResult }
 
 interface Filtros {
-  periodoInicio: string;  // "YYYY-MM"
-  periodoFim:    string;  // "YYYY-MM"
+  periodoInicio: string;
+  periodoFim:    string;
   viewMode:      ViewMode;
   mostrarZeros:  boolean;
+  crIds:         string[];
 }
 
 const _y = new Date().getFullYear();
-const filtrosVazios: Filtros = { periodoInicio: `${_y}-01`, periodoFim: `${_y}-12`, viewMode: "mensal", mostrarZeros: false };
+const filtrosVazios: Filtros = { periodoInicio: `${_y}-01`, periodoFim: `${_y}-12`, viewMode: "mensal", mostrarZeros: false, crIds: [] };
 
 // ─── Grupos de período ────────────────────────────────────────────────────────
 
@@ -71,8 +69,7 @@ const VIEW_LABELS: Record<ViewMode, string> = {
 // ─── DRE helpers ──────────────────────────────────────────────────────────────
 
 function computeCodes(items: DemoItem[]): string[] {
-  const counters = [0,0,0,0,0];
-  let prev = 0;
+  const counters = [0,0,0,0,0]; let prev = 0;
   return items.map(item => {
     const n = item.nivel;
     if (n > prev + 1) for (let i = prev + 1; i < n; i++) if (!counters[i]) counters[i] = 1;
@@ -80,52 +77,34 @@ function computeCodes(items: DemoItem[]): string[] {
     for (let i = n + 1; i <= 4; i++) counters[i] = 0;
     const parts: number[] = [];
     for (let i = 1; i <= n; i++) parts.push(counters[i]);
-    prev = n;
-    return parts.join(".");
+    prev = n; return parts.join(".");
   });
 }
 
-function hasEffectiveRule(r: RegraItem | undefined): boolean {
-  if (!r || r.modo === "none") return false;
-  if (r.modo === "especifico") return !!r.codEspecifico;
-  if (r.modo === "multiplo") return (r.codMultiplos?.length ?? 0) > 0;
-  return !!(r.codDe || r.codAte);
-}
+/**
+ * Preenche a DRE a partir do mapa de orçamento para um único período ("YYYY-MM").
+ * CONTA: soma de todas as linhas de orçamento com demoItemIdGerencial = item.id
+ * SUBTOTAL: propagado a partir dos filhos (ou fórmula explícita)
+ */
+function computePeriodFromOrcamento(
+  dre: DemoItem[],
+  orcMap: Map<string, Map<string, number>>,
+  period: string
+): PeriodResult {
+  const valores = new Map<string, number>();
 
-function matchesRegra(cod: string, r: RegraItem | undefined): boolean {
-  if (!r || r.modo === "none") return true;
-  if (r.modo === "especifico") return r.codEspecifico ? cod === r.codEspecifico : true;
-  if (r.modo === "multiplo") return r.codMultiplos ? r.codMultiplos.includes(cod) : true;
-  const cmp = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
-  if (r.codDe && cmp(cod, r.codDe) < 0) return false;
-  if (r.codAte && cmp(cod, r.codAte) > 0) return false;
-  return true;
-}
-
-function computePeriod(dre: DemoItem[], lans: LancamentoFinanceiro[]): PeriodResult {
-  const valores  = new Map<string, number>();
-  const alocados = new Set<number>();
-
+  // Carrega orcMap para todos os itens (CONTA e SUBTOTAL)
+  // Garante que linhas de orçamento mapeadas para SUBTOTALs também sejam incluídas
   for (const item of dre) {
-    if (item.tipo !== "CONTA") continue;
-    const hasNat = hasEffectiveRule(item.regras?.natureza);
-    const hasCr  = hasEffectiveRule(item.regras?.centroResultado);
-    if (!hasNat && !hasCr) { valores.set(item.id, 0); continue; }
-    let total = 0;
-    for (let i = 0; i < lans.length; i++) {
-      const l = lans[i];
-      if ((!hasNat || matchesRegra(l.codnat, item.regras?.natureza)) &&
-          (!hasCr  || matchesRegra(l.codcencus, item.regras?.centroResultado))) {
-        total += l.valor; alocados.add(i);
-      }
-    }
-    valores.set(item.id, total);
+    const v = orcMap.get(item.id)?.get(period);
+    if (v !== undefined) valores.set(item.id, v);
   }
 
+  // Propaga SUBTOTAL sem fórmula: soma filhos diretos sobre o valor já existente
   for (let i = dre.length - 1; i >= 0; i--) {
     const item = dre[i];
     if (item.tipo !== "SUBTOTAL" || Array.isArray(item.formula)) continue;
-    let total = 0;
+    let total = valores.get(item.id) ?? 0;
     for (let j = i + 1; j < dre.length; j++) {
       if (dre[j].nivel <= item.nivel) break;
       if (dre[j].nivel === item.nivel + 1) total += valores.get(dre[j].id) ?? 0;
@@ -133,6 +112,7 @@ function computePeriod(dre: DemoItem[], lans: LancamentoFinanceiro[]): PeriodRes
     valores.set(item.id, total);
   }
 
+  // SUBTOTAL com fórmula explícita
   for (const item of dre) {
     if (item.tipo !== "SUBTOTAL" || !Array.isArray(item.formula)) continue;
     valores.set(item.id, item.formula.reduce(
@@ -140,7 +120,7 @@ function computePeriod(dre: DemoItem[], lans: LancamentoFinanceiro[]): PeriodRes
     ));
   }
 
-  return { valores, naoAlocado: lans.reduce((s, l, i) => alocados.has(i) ? s : s + l.valor, 0) };
+  return { valores, naoAlocado: 0 };
 }
 
 const EMPTY_PERIOD: PeriodResult = { valores: new Map(), naoAlocado: 0 };
@@ -150,7 +130,7 @@ function aggregatePeriods(meses: number[], monthly: PeriodResult[], dre: DemoIte
   for (const item of dre) {
     valores.set(item.id, meses.reduce((s, mi) => s + (monthly[mi].valores.get(item.id) ?? 0), 0));
   }
-  return { valores, naoAlocado: meses.reduce((s, mi) => s + monthly[mi].naoAlocado, 0) };
+  return { valores, naoAlocado: 0 };
 }
 
 function getRowStyle(tipo: string, nivel: number) {
@@ -163,42 +143,13 @@ function getRowStyle(tipo: string, nivel: number) {
 }
 
 function fmtInt(v: number) {
-  return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 0, maximumFractionDigits: 0 });
-}
-
-function fmtDate(d: string) {
-  const [y, m, day] = d.split("-");
-  return `${day}/${m}/${y}`;
+  const s = Math.abs(v).toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  return v < 0 ? `(${s})` : s;
 }
 
 function fmtPeriodo(p: string) {
   const [y, m] = p.split("-");
   return `${MESES[parseInt(m) - 1]}/${y}`;
-}
-
-function getContasForItem(item: DemoItem, dre: DemoItem[]): DemoItem[] {
-  if (item.tipo === "CONTA") return [item];
-  const idx = dre.findIndex(d => d.id === item.id);
-  const contas: DemoItem[] = [];
-  for (let i = idx + 1; i < dre.length; i++) {
-    if (dre[i].nivel <= item.nivel) break;
-    if (dre[i].tipo === "CONTA") contas.push(dre[i]);
-  }
-  return contas;
-}
-
-function getLancamentosForItem(item: DemoItem, dre: DemoItem[], lans: LancamentoFinanceiro[]): LancamentoFinanceiro[] {
-  const contas = getContasForItem(item, dre);
-  if (contas.length === 0) return [];
-  return lans.filter(l =>
-    contas.some(conta => {
-      const hasNat = hasEffectiveRule(conta.regras?.natureza);
-      const hasCr  = hasEffectiveRule(conta.regras?.centroResultado);
-      if (!hasNat && !hasCr) return false;
-      return (!hasNat || matchesRegra(l.codnat, conta.regras?.natureza)) &&
-             (!hasCr  || matchesRegra(l.codcencus, conta.regras?.centroResultado));
-    })
-  );
 }
 
 // ─── Fallback DRE ─────────────────────────────────────────────────────────────
@@ -224,160 +175,137 @@ const dreInicial: DemoItem[] = [
 // ─── Página ───────────────────────────────────────────────────────────────────
 
 export default function DreOrcadaPage() {
-  const [dre]        = usePersistedData<DemoItem[]>("portal_dre", dreInicial);
-  const [fechamentos] = usePersistedData<Fechamento[]>("portal_fechamentos", []);
+  const [dre] = usePersistedData<DemoItem[]>("portal_dre", dreInicial);
 
-  const [lancamentos, setLancamentos] = useState<LancamentoFinanceiro[]>([]);
-  const [dataLoaded, setDataLoaded]   = useState(false);
-
-  const [fechamentoId, setFechamentoId] = useState<string>("__ativo__");
-  const [collapsed,    setCollapsed]    = useState<Set<string>>(new Set());
+  const [collapsed,   setCollapsed]  = useState<Set<string>>(new Set());
+  const [activeLevel, setActiveLevel] = useState<number | "all">(1);
+  const initialCollapseRef = useRef(false);
 
   const [filterOpen, setFilterOpen] = useState(false);
-  const [filtros,    setFiltros]    = usePersistedData<Filtros>("portal_dre_filtros_orcado", filtrosVazios);
-  const [rascunho,   setRascunho]   = useState<Filtros>(filtrosVazios);
+  const [filtros, setFiltros] = usePersistedData<Filtros>("portal_dre_filtros_orcado", filtrosVazios);
+  const [rascunho, setRascunho] = useState<Filtros>(filtrosVazios);
 
-  const [detalhe, setDetalhe] = useState<{ item: DemoItem; lans: LancamentoFinanceiro[] } | null>(null);
-  const [periodosSel, setPeriodosSel] = useState<Set<string>>(new Set());
+  // ── Anos e mapa de orçamento: carregados apenas no cliente (localStorage) ──
+  const [anosDisponiveis, setAnosDisponiveis] = useState<number[]>([new Date().getFullYear()]);
+  const [orcVersion, setOrcVersion] = useState(0);
+  const [mounted, setMounted] = useState(false);
 
-  const natMap  = useMemo(() => new Map(loadData<NaturezaRow[]>("portal_natureza", []).map(r => [r.CODNAT, r.DESCRNAT])), []);
-  const projMap = useMemo(() => new Map(loadData<ProjetoRow[]>("portal_projetos", []).map(r => [r.CODPROJ, r.IDENTIFICACAO])), []);
-  const crMap   = useMemo(() => new Map(loadData<CentroResultadoRow[]>("portal_centro_resultado", []).map(r => [r.CODCENCUS, r.DESCRCENCUS])), []);
-  const empMap  = useMemo(() => new Map(loadData<EmpresaRow[]>("portal_empresas", []).map(r => [r.CODEMP, r.RAZAOSOCIAL])), []);
-  const parcMap = useMemo(() => new Map(loadData<ParceiroRow[]>("portal_parceiro", []).map(r => [r.CODPARC, r.NOMEPARC])), []);
-
-  useEffect(() => {
-    if (!detalhe) return;
-    setPeriodosSel(new Set(detalhe.lans.map(l => l.periodo)));
-  }, [detalhe?.item.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const detalhePeriodos = useMemo(() =>
-    detalhe ? [...new Set(detalhe.lans.map(l => l.periodo))].sort() : [],
-    [detalhe]
-  );
-
-  const detalheGrupos = useMemo(() => {
-    if (!detalhe) return [];
-    const sorted = [...detalhe.lans]
-      .filter(l => periodosSel.has(l.periodo))
-      .sort((a, b) => a.periodo.localeCompare(b.periodo) || a.data.localeCompare(b.data));
-    const grupos: { periodo: string; lans: LancamentoFinanceiro[] }[] = [];
-    for (const l of sorted) {
-      const last = grupos[grupos.length - 1];
-      if (last && last.periodo === l.periodo) last.lans.push(l);
-      else grupos.push({ periodo: l.periodo, lans: [l] });
-    }
-    return grupos;
-  }, [detalhe, periodosSel]);
-
-  const detalheTotal = useMemo(() =>
-    detalheGrupos.reduce((s, g) => s + g.lans.reduce((ss, l) => ss + l.valor, 0), 0),
-    [detalheGrupos]
-  );
-
-  function exportarDetalhe() {
-    if (!detalhe) return;
-    const rows = detalheGrupos.flatMap(g =>
-      g.lans.map(l => ({
-        NUFIN:               l.nufin ?? "",
-        Data:                fmtDate(l.data),
-        Período:             fmtPeriodo(l.periodo),
-        Natureza:            `${l.codnat} ${natMap.get(l.codnat) ?? ""}`.trim(),
-        "Centro de Resultado": `${l.codcencus} ${crMap.get(l.codcencus) ?? ""}`.trim(),
-        Empresa:             `${l.codemp} ${empMap.get(l.codemp) ?? ""}`.trim(),
-        Projeto:             l.codproj ? `${l.codproj} ${projMap.get(l.codproj) ?? ""}`.trim() : "",
-        Parceiro:            l.codparc ? `${l.codparc} ${parcMap.get(l.codparc) ?? ""}`.trim() : "",
-        Valor:               l.valor,
-      }))
-    );
-    const ws = XLSX.utils.json_to_sheet(rows);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, detalhe.item.descricao.slice(0, 31));
-    XLSX.writeFile(wb, `DRE_Orcado_${detalhe.item.descricao.replace(/[/\\?*[\]]/g, "_")}.xlsx`);
-  }
+  const ano = parseInt(filtros.periodoInicio.slice(0, 4)) || new Date().getFullYear();
+  const filtrosRef = useRef(filtros);
+  filtrosRef.current = filtros;
 
   useEffect(() => {
-    const fb = setTimeout(() => setDataLoaded(true), 400);
-    idbGet<LancamentoFinanceiro[]>("portal_lancamentos_financeiro", []).then(data => {
-      clearTimeout(fb); setLancamentos(data); setDataLoaded(true);
-    });
-  }, []);
+    function corrigirAno() {
+      const dreIds = new Set(loadData<{id: string}[]>("portal_dre", []).map(i => i.id));
 
-  const fechamentosOrcado = useMemo(
-    () => fechamentos.filter(f => f.tipo === "orcado").sort((a, b) => b.criadoEm.localeCompare(a.criadoEm)),
-    [fechamentos]
-  );
+      // Conta quantos itens do DRE atual têm dados no orçamento para um dado ano
+      function matchCount(y: number): number {
+        const m = buildOrcamentoMap("gerencial", y, null);
+        let n = 0;
+        for (const id of m.keys()) if (dreIds.has(id)) n++;
+        return n;
+      }
 
-  const fechamentoAtivo = useMemo(
-    () => fechamentos.find(f => f.tipo === "orcado" && f.ativo) ?? null,
-    [fechamentos]
-  );
+      const anos = getOrcamentoAnos();
+      setAnosDisponiveis(anos);
 
-  const fechamentoVisual = useMemo(() => {
-    if (fechamentoId === "__ativo__") return fechamentoAtivo;
-    return fechamentos.find(f => f.id === fechamentoId) ?? fechamentoAtivo;
-  }, [fechamentoId, fechamentos, fechamentoAtivo]);
-
-  const anosDisponiveis = useMemo(() => {
-    const set = new Set<number>();
-    lancamentos.filter(l => l.tipo === "orcado").forEach(l => {
-      const y = parseInt(l.periodo.split("-")[0]);
-      if (!isNaN(y)) set.add(y);
-    });
-    return [...set].sort((a, b) => b - a);
-  }, [lancamentos]);
-
-  useEffect(() => {
-    if (anosDisponiveis.length > 0) {
-      const anoAtual = parseInt(filtros.periodoInicio.split("-")[0]);
-      if (!anosDisponiveis.includes(anoAtual)) {
-        const y = anosDisponiveis[0];
-        setFiltros(f => ({ ...f, periodoInicio: `${y}-01`, periodoFim: `${y}-12` }));
-        setRascunho(r => ({ ...r, periodoInicio: `${y}-01`, periodoFim: `${y}-12` }));
+      const anoAtual = parseInt(filtrosRef.current.periodoInicio.slice(0, 4)) || new Date().getFullYear();
+      if (matchCount(anoAtual) === 0) {
+        // Inclui o ano do comparativo como dica adicional
+        const filtrosComp = loadData<{periodoInicio?: string}>("portal_dre_filtros_comparativo", {});
+        const anoComp = parseInt((filtrosComp.periodoInicio ?? "").slice(0, 4));
+        const candidatos = new Set([...anos, ...(anoComp > 0 ? [anoComp] : [])]);
+        const melhor = [...candidatos]
+          .map(y => ({ y, n: matchCount(y) }))
+          .filter(x => x.n > 0)
+          .sort((a, b) => b.n - a.n)[0];
+        if (melhor) {
+          const y = melhor.y;
+          setAnosDisponiveis(prev => prev.includes(y) ? prev : [...prev, y].sort((a, b) => b - a));
+          setFiltros(f => ({ ...f, periodoInicio: `${y}-01`, periodoFim: `${y}-12` }));
+          setRascunho(r => ({ ...r, periodoInicio: `${y}-01`, periodoFim: `${y}-12` }));
+        }
       }
     }
-  }, [anosDisponiveis]); // eslint-disable-line react-hooks/exhaustive-deps
+    corrigirAno();
+    setMounted(true);
+    prefetchKeys(PREFETCH_ORCADO_KEYS);
 
-  const lancamentosBase = useMemo(() => {
-    if (!dataLoaded) return [];
-    return lancamentos.filter(l => {
-      if (l.tipo !== "orcado") return false;
-      if (fechamentoVisual && l.fechamentoId !== fechamentoVisual.id) return false;
-      return true;
-    });
-  }, [lancamentos, dataLoaded, fechamentoVisual]);
-
-  const lancamentosPeriodo = useMemo(() => {
-    const { periodoInicio, periodoFim } = filtros;
-    return lancamentosBase.filter(l => l.periodo >= periodoInicio && l.periodo <= periodoFim);
-  }, [lancamentosBase, filtros]);
-
-  const lancamentosPorPeriodo = useMemo(() => {
-    const map = new Map<string, LancamentoFinanceiro[]>();
-    for (const l of lancamentosBase) {
-      const bucket = map.get(l.periodo);
-      if (bucket) bucket.push(l);
-      else map.set(l.periodo, [l]);
+    function onUpdate(e: Event) {
+      const key = (e as CustomEvent<{ key: string }>).detail?.key ?? "";
+      if (key.startsWith("portal_orcamento_")) {
+        setOrcVersion(v => v + 1);
+        corrigirAno();
+      }
     }
-    return map;
-  }, [lancamentosBase]);
+    window.addEventListener("portal-data-update", onUpdate);
+    return () => window.removeEventListener("portal-data-update", onUpdate);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const crOpcoes = useMemo(() =>
+    loadData<CentroResultadoRow[]>("portal_centro_resultado", [])
+      .filter(r => r.GRAU === 1 && r.ATIVO && (r.ENTRA_RESULTADO === "DRE" || r.ENTRA_RESULTADO === "AMBOS"))
+      .sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" })),
+  []);
+
+  const crFiltroSet = useMemo(() => {
+    const ids = filtros.crIds ?? [];
+    if (ids.length === 0) return null;
+    const allCrs = loadData<CentroResultadoRow[]>("portal_centro_resultado", [])
+      .sort((a, b) => a.CODCENCUS.localeCompare(b.CODCENCUS, undefined, { numeric: true, sensitivity: "base" }));
+    const crMap = new Map(allCrs.map(cr => [cr.CODCENCUS, cr]));
+    const hasPaiData = allCrs.some(cr => !!cr.CODCENCUSPAI);
+    const result = new Set<string>();
+    if (hasPaiData) {
+      // CODCENCUSPAI disponível: sobe a cadeia de pais até encontrar o GRAU=1
+      for (const cr of allCrs) {
+        let cur: typeof cr | undefined = cr;
+        while (cur && cur.GRAU > 1 && cur.CODCENCUSPAI) cur = crMap.get(cur.CODCENCUSPAI);
+        if (cur && ids.includes(cur.CODCENCUS)) result.add(cr.CODCENCUS);
+      }
+    } else {
+      // Fallback: buildHierarchy por ordem de CODCENCUS (funciona quando pais ordenam antes dos filhos)
+      const withHierarchy = buildHierarchy(allCrs, "DESCRCENCUS");
+      const selectedDescrs = new Set(
+        allCrs.filter(cr => ids.includes(cr.CODCENCUS)).map(cr => cr.DESCRCENCUS)
+      );
+      for (const cr of withHierarchy) {
+        const grau1 = cr.GRAU_1 as string | undefined;
+        if (ids.includes(cr.CODCENCUS) || (grau1 && selectedDescrs.has(grau1)))
+          result.add(cr.CODCENCUS);
+      }
+    }
+    return result;
+  }, [filtros.crIds]);
+
+  const orcMap = useMemo(
+    () => buildOrcamentoMap("gerencial", ano, crFiltroSet),
+    [ano, crFiltroSet, orcVersion] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  useEffect(() => {
+    if (initialCollapseRef.current || dre.length === 0) return;
+    initialCollapseRef.current = true;
+    setCollapsed(new Set(dre.filter(d => d.tipo === "SUBTOTAL").map(d => d.id)));
+  }, [dre]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Valores mensais ────────────────────────────────────────────────────────
   const valoresPorMes = useMemo(() => {
     const { periodoInicio, periodoFim } = filtros;
-    const ano = periodoInicio.slice(0, 4);
+    const anoFiltro = periodoInicio.slice(0, 4);
     return MESES.map((_, mi) => {
-      const p = `${ano}-${String(mi + 1).padStart(2, "0")}`;
+      const p = `${anoFiltro}-${String(mi + 1).padStart(2, "0")}`;
       if (p < periodoInicio || p > periodoFim) return EMPTY_PERIOD;
-      return computePeriod(dre, lancamentosPorPeriodo.get(p) ?? []);
+      return computePeriodFromOrcamento(dre, orcMap, p);
     });
-  }, [dre, lancamentosPorPeriodo, filtros]);
+  }, [dre, orcMap, filtros]);
 
   const colunas = useMemo<ColDRE[]>(() => {
     const { viewMode, periodoInicio, periodoFim } = filtros;
-    const ano = periodoInicio.slice(0, 4);
+    const anoFiltro = periodoInicio.slice(0, 4);
     return GRUPOS_DEF[viewMode]
       .filter(g => g.meses.some(mi => {
-        const p = `${ano}-${String(mi + 1).padStart(2, "0")}`;
+        const p = `${anoFiltro}-${String(mi + 1).padStart(2, "0")}`;
         return p >= periodoInicio && p <= periodoFim;
       }))
       .map(g => ({
@@ -389,13 +317,16 @@ export default function DreOrcadaPage() {
 
   const valoresTotal = useMemo(() => {
     const { periodoInicio, periodoFim } = filtros;
-    const ano = periodoInicio.slice(0, 4);
-    const meses = MESES.map((_, mi) => `${ano}-${String(mi + 1).padStart(2, "0")}`);
-    const idxs  = meses.map((p, mi) => ({ p, mi })).filter(({ p }) => p >= periodoInicio && p <= periodoFim).map(({ mi }) => mi);
+    const anoFiltro = periodoInicio.slice(0, 4);
+    const idxs = MESES.map((_, mi) => `${anoFiltro}-${String(mi + 1).padStart(2, "0")}`)
+      .map((p, mi) => ({ p, mi }))
+      .filter(({ p }) => p >= periodoInicio && p <= periodoFim)
+      .map(({ mi }) => mi);
     return aggregatePeriods(idxs, valoresPorMes, dre);
   }, [filtros, valoresPorMes, dre]);
 
-  const codes = useMemo(() => computeCodes(dre), [dre]);
+  const codes    = useMemo(() => computeCodes(dre), [dre]);
+  const maxNivel = useMemo(() => Math.max(...dre.filter(d => d.tipo === "SUBTOTAL").map(d => d.nivel), 1), [dre]);
 
   const visibleData = useMemo(() => {
     const hidden = new Set<string>();
@@ -421,75 +352,113 @@ export default function DreOrcadaPage() {
   const filtrosAtivos = useMemo(() => {
     let n = 0;
     if (filtros.viewMode !== "mensal") n++;
-    const ano = filtros.periodoInicio.slice(0, 4);
-    if (filtros.periodoInicio !== `${ano}-01` || filtros.periodoFim !== `${ano}-12`) n++;
+    const anoF = filtros.periodoInicio.slice(0, 4);
+    if (filtros.periodoInicio !== `${anoF}-01` || filtros.periodoFim !== `${anoF}-12`) n++;
     if (filtros.mostrarZeros) n++;
+    if ((filtros.crIds?.length ?? 0) > 0) n++;
     return n;
   }, [filtros]);
 
+  function handleSetLevel(nivel: number | "all") {
+    setActiveLevel(nivel);
+    if (nivel === "all") {
+      setCollapsed(new Set());
+    } else {
+      setCollapsed(new Set(dre.filter(d => d.tipo === "SUBTOTAL" && d.nivel >= nivel).map(d => d.id)));
+    }
+  }
+
   function toggleCollapse(id: string) {
+    setActiveLevel("all");
     setCollapsed(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   }
 
   function aplicar()    { setFiltros(rascunho); setFilterOpen(false); }
   function limparTudo() { setRascunho(filtrosVazios); }
 
-  const anoAtivo = filtros.periodoInicio.slice(0, 4);
-  const lancamentosDoAno = lancamentosBase.filter(l => l.periodo.startsWith(anoAtivo)).length;
-  const subtitle = fechamentoVisual ? `${fechamentoVisual.label} · ${anoAtivo}` : `Orçado · ${anoAtivo}`;
-  const viewMode = filtros.viewMode;
-
-  // ── Loading ──────────────────────────────────────────────────────────────────
-
-  if (!dataLoaded) {
-    return (
-      <div>
-        <PageHeader title="Demonstração de Resultado do Exercício" subtitle="Orçado" />
-        <div className="flex items-center justify-center py-20 gap-3 text-gray-400">
-          <div className="w-5 h-5 border-2 border-gray-200 border-t-blue-500 rounded-full animate-spin" />
-          <span className="text-sm">Carregando lançamentos…</span>
-        </div>
-      </div>
-    );
+  function exportar() {
+    const rows = visibleData.map(({ item }) => {
+      const row: Record<string, string | number> = { Descrição: item.descricao, Tipo: item.tipo };
+      colunas.forEach(c => { row[c.label] = c.result.valores.get(item.id) ?? 0; });
+      row["Total"] = valoresTotal.valores.get(item.id) ?? 0;
+      return row;
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, `DRE Orçado ${ano}`);
+    XLSX.writeFile(wb, `DRE_Orcado_${ano}.xlsx`);
   }
 
-  if (fechamentosOrcado.length === 0) {
-    return (
-      <div>
-        <PageHeader title="Demonstração de Resultado do Exercício" subtitle="Orçado" />
-        <div className="p-6">
-          <div className="flex flex-col items-center justify-center py-20 text-center bg-white rounded-xl border border-gray-100">
-            <p className="text-gray-500 font-medium">Nenhum fechamento de Orçado importado</p>
-            <p className="text-gray-400 text-sm mt-1">Importe um fechamento em Lançamentos › Financeiro.</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  // ── UI helpers ─────────────────────────────────────────────────────────────
 
-  // ── Render ───────────────────────────────────────────────────────────────────
-
-  const mIni = parseInt(filtros.periodoInicio.split("-")[1]) - 1;
-  const mFim = parseInt(filtros.periodoFim.split("-")[1]) - 1;
+  const anoAtivo    = filtros.periodoInicio.slice(0, 4);
+  const viewMode    = filtros.viewMode;
+  const mIni        = parseInt(filtros.periodoInicio.split("-")[1]) - 1;
+  const mFim        = parseInt(filtros.periodoFim.split("-")[1]) - 1;
   const periodoLabel = mIni === 0 && mFim === 11
     ? anoAtivo
     : `${MESES[mIni]}–${MESES[mFim]} ${anoAtivo}`;
 
+  void codes; // referência para evitar lint de variável não usada
+
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugTab, setDebugTab] = useState<"geral" | "cr">("geral");
+  const debugInfo = useMemo(() => {
+    const contasSemDado = dre.filter(i => i.tipo === "CONTA" && !orcMap.get(i.id)?.size);
+    const orcMapOrfaos  = [...orcMap.keys()].filter(id => !dre.some(i => i.id === id));
+    const contasComDado = dre.filter(i => i.tipo === "CONTA" && (orcMap.get(i.id)?.size ?? 0) > 0);
+    const detalhes      = buildOrcamentoDebug("gerencial", ano);
+    const porItem = new Map<string, typeof detalhes>();
+    for (const e of detalhes) {
+      const arr = porItem.get(e.itemId) ?? [];
+      arr.push(e);
+      porItem.set(e.itemId, arr);
+    }
+    const orfaosDetalhados = orcMapOrfaos.map(id => ({
+      id,
+      areas: porItem.get(id) ?? [],
+      total: [...(orcMap.get(id)?.values() ?? [])].reduce((a, b) => a + b, 0),
+    }));
+    const paiDeConta = (item: { id: string; nivel: number }) => {
+      const idx = dre.findIndex(i => i.id === item.id);
+      for (let k = idx - 1; k >= 0; k--) {
+        if (dre[k].tipo === "SUBTOTAL" && dre[k].nivel === item.nivel - 1) return dre[k];
+      }
+      return null;
+    };
+    const periodosDeConta = (id: string) => [...(orcMap.get(id)?.keys() ?? [])].sort().join(", ");
+
+    // CR diagnostics (only when filter active)
+    let crDiag: OrcamentoCRDiagEntry[] = [];
+    if (crFiltroSet) {
+      crDiag = buildOrcamentoCRDiag("gerencial", ano, crFiltroSet);
+    }
+
+    return { contasSemDado, orcMapOrfaos, contasComDado, porItem, orfaosDetalhados, paiDeConta, periodosDeConta, orcMapTotal: orcMap.size, dreContaTotal: dre.filter(i => i.tipo === "CONTA").length, crDiag };
+  }, [dre, orcMap, ano, crFiltroSet]);
+
+  // ── Render ────────────────────────────────────────────────────────────────
+
   return (
     <div>
-      <PageHeader title="Demonstração de Resultado do Exercício" subtitle={subtitle} />
+      <PageHeader title="Demonstração de Resultado do Exercício" subtitle={`Orçado · ${anoAtivo}`} />
 
-      <div className="p-6 space-y-4">
+      <div className="p-6 space-y-4 min-w-max">
 
         {/* ── Controles ──────────────────────────────────────────────────────── */}
         <div className="flex items-center gap-3 flex-wrap">
 
-          {/* Fechamento */}
-          <select value={fechamentoId} onChange={e => setFechamentoId(e.target.value)}
+          {/* Seletor de ano */}
+          <select
+            value={anoAtivo}
+            onChange={e => {
+              const y = e.target.value;
+              setFiltros(f => ({ ...f, periodoInicio: `${y}-01`, periodoFim: `${y}-12` }));
+              setRascunho(r => ({ ...r, periodoInicio: `${y}-01`, periodoFim: `${y}-12` }));
+            }}
             className="border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-600 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-            {fechamentoAtivo && <option value="__ativo__">★ {fechamentoAtivo.label} (ativo)</option>}
-            {fechamentosOrcado.map(f => (
-              <option key={f.id} value={f.id}>{f.ativo ? `★ ${f.label}` : f.label}</option>
+            {anosDisponiveis.map(y => (
+              <option key={y} value={String(y)}>{y}</option>
             ))}
           </select>
 
@@ -506,261 +475,285 @@ export default function DreOrcadaPage() {
             )}
           </button>
 
-          <span className="ml-auto text-xs text-gray-400">
-            {lancamentosDoAno.toLocaleString("pt-BR")} lançamentos · {VIEW_LABELS[viewMode]} · {periodoLabel}
+          {/* Níveis */}
+          <div className="flex items-center rounded-lg border border-gray-200 overflow-hidden">
+            {Array.from({ length: maxNivel }, (_, i) => i + 1).map(n => (
+              <button key={n} onClick={() => handleSetLevel(n)}
+                className="px-3 py-2 text-xs font-semibold transition-colors"
+                style={activeLevel === n ? { background: "#1e3a5f", color: "white" } : { background: "white", color: "#374151" }}>
+                N{n}
+              </button>
+            ))}
+            <button onClick={() => handleSetLevel("all")}
+              className="px-3 py-2 text-xs font-semibold transition-colors border-l border-gray-200"
+              style={activeLevel === "all" ? { background: "#1e3a5f", color: "white" } : { background: "white", color: "#374151" }}>
+              Tudo
+            </button>
+          </div>
+
+          {/* Exportar */}
+          <button onClick={exportar}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium border border-gray-200 rounded-lg bg-white hover:bg-gray-50 text-gray-600 transition-colors ml-auto">
+            <Download size={14} /> Exportar Excel
+          </button>
+
+          <span className="text-xs text-gray-400">
+            Base: Orçamento · {VIEW_LABELS[viewMode]} · {periodoLabel}
           </span>
         </div>
 
         {/* ── Tabela pivô ─────────────────────────────────────────────────────── */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
-            <span className="font-semibold text-gray-800 text-sm">
-              DRE · Orçado ·{" "}
-              <span className="font-normal text-gray-500">{VIEW_LABELS[viewMode]} · {periodoLabel}</span>
-            </span>
-          </div>
+            <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+              <span className="font-semibold text-gray-800 text-sm">
+                DRE Gerencial · Orçado ·{" "}
+                <span className="font-normal text-gray-500">{VIEW_LABELS[viewMode]} · {periodoLabel}</span>
+              </span>
+            </div>
 
-          <div className="overflow-x-auto">
-            <table className="text-sm border-collapse" style={{ minWidth: "max-content", width: "100%" }}>
-              <thead>
-                {viewMode === "trimestral" && (
-                  <tr style={{ background: "#152d4a" }}>
-                    <th className="sticky left-0 z-30 min-w-[200px]" style={{ background: "#152d4a" }} />
-                    {colunas.map((c, ci) => (
-                      <th key={ci} colSpan={1}
-                        className="px-3 py-1 text-center text-[10px] text-white/50 uppercase tracking-widest font-semibold border-l border-white/10">
-                        {c.label}
-                      </th>
-                    ))}
-                    <th className="border-l border-white/10" style={{ background: "#152d4a" }} />
-                  </tr>
-                )}
-
-                <tr style={{ background: "#1e3a5f" }}>
-                  <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-30 min-w-[200px]"
-                    style={{ background: "#1e3a5f" }}>
-                    Descrição
-                  </th>
-                  {colunas.map((c, ci) => {
-                    const sep = viewMode === "trimestral" && ci > 0;
-                    return (
-                      <th key={ci}
-                        className={`font-semibold text-white/80 text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap min-w-[130px]${sep ? " border-l border-white/10" : ""}`}
-                        style={{ background: "#1e3a5f" }}>
-                        <div className="uppercase">{c.label}</div>
-                        {c.sublabel && <div className="font-normal text-[10px] text-white/40 mt-0.5">{c.sublabel}</div>}
-                      </th>
-                    );
-                  })}
-                  <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap min-w-[140px] border-l border-white/20"
-                    style={{ background: "#1e3a5f" }}>
-                    Total
-                  </th>
-                </tr>
-              </thead>
-
-              <tbody>
-                {visibleData.map(({ item }) => {
-                  const s           = getRowStyle(item.tipo, item.nivel);
-                  const isSubtotal  = item.tipo === "SUBTOTAL";
-                  const isCollapsed = isSubtotal && collapsed.has(item.id);
-                  const total       = valoresTotal.valores.get(item.id) ?? 0;
-
-                  return (
-                    <tr key={item.id}
-                      style={{ background: s.bg, color: s.color, fontWeight: s.fw }}
-                      className="border-b border-gray-100 cursor-pointer hover:brightness-95 transition-all"
-                      onClick={() => setDetalhe({ item, lans: getLancamentosForItem(item, dre, lancamentosPeriodo) })}>
-
-                      <td className="px-4 py-2.5 sticky left-0 z-10" style={{ background: s.bg }}>
-                        <span className="flex items-center gap-1" style={{ paddingLeft: `${(item.nivel - 1) * 16}px` }}>
-                          {isSubtotal ? (
-                            <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id); }}
-                              className="flex-shrink-0 rounded p-0.5 transition-colors"
-                              style={{ color: s.dark ? "rgba(255,255,255,0.7)" : "#1e3a5f" }}>
-                              {isCollapsed ? <ChevronRt size={13} /> : <ChevronDown size={13} />}
-                            </button>
-                          ) : <span className="w-4 flex-shrink-0" />}
-                          <span className="whitespace-nowrap">{item.descricao}</span>
-                        </span>
-                      </td>
-
-                      {colunas.map((c, ci) => {
-                        const v = c.result.valores.get(item.id) ?? 0;
-                        const sep = viewMode === "trimestral" && ci > 0;
-                        return (
-                          <td key={ci}
-                            className={`px-3 py-2.5 text-right tabular-nums whitespace-nowrap${sep ? " border-l border-gray-100" : ""}`}>
-                            {v !== 0
-                              ? <span className={v < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtInt(v)}</span>
-                              : <span style={{ opacity: 0.18 }}>—</span>}
-                          </td>
-                        );
-                      })}
-
-                      <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap border-l border-gray-100"
-                        style={{ fontWeight: isSubtotal ? "700" : "500" }}>
-                        <span className={total < 0 ? (s.dark ? "text-red-300" : "text-red-600") : ""}>{fmtInt(total)}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {visibleData.length === 0 && valoresTotal.naoAlocado === 0 && (
-                  <tr>
-                    <td colSpan={2 + colunas.length} className="px-4 py-12 text-center text-gray-400 text-sm">
-                      Nenhuma linha com valor.{" "}
-                      <button
-                        onClick={() => { setFiltros(f => ({ ...f, mostrarZeros: true })); setRascunho(r => ({ ...r, mostrarZeros: true })); }}
-                        className="text-blue-500 hover:underline">
-                        Mostrar linhas zeradas
-                      </button>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      {/* ── Modal de detalhamento ────────────────────────────────────────────── */}
-      {detalhe && (
-        <>
-          <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setDetalhe(null)} />
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3">
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-[96vw] max-h-[88vh] flex flex-col">
-
-              <div className="flex items-center justify-between px-5 py-3.5 border-b border-gray-200 flex-shrink-0">
-                <p className="font-semibold text-gray-800">{detalhe.item.descricao}</p>
-                <button onClick={() => setDetalhe(null)}
-                  className="text-gray-400 hover:text-gray-600 transition-colors text-lg leading-none">✕</button>
-              </div>
-
-              <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50 flex-shrink-0 flex-wrap">
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Período</span>
-                <div className="flex items-center gap-1.5 flex-wrap flex-1">
-                  {detalhePeriodos.map(p => {
-                    const sel = periodosSel.has(p);
-                    return (
-                      <button key={p}
-                        onClick={() => setPeriodosSel(prev => {
-                          const n = new Set(prev);
-                          sel ? n.delete(p) : n.add(p);
-                          return n;
-                        })}
-                        className="px-2.5 py-1 rounded-full text-xs font-medium transition-all border"
-                        style={sel
-                          ? { background: "#1e3a5f", color: "white",   borderColor: "#1e3a5f" }
-                          : { background: "white",   color: "#64748b", borderColor: "#e2e8f0" }}>
-                        {fmtPeriodo(p)}
-                      </button>
-                    );
-                  })}
-                  {detalhePeriodos.length > 1 && (
-                    <button
-                      onClick={() => setPeriodosSel(
-                        periodosSel.size === detalhePeriodos.length
-                          ? new Set()
-                          : new Set(detalhePeriodos)
-                      )}
-                      className="text-[11px] text-blue-600 hover:underline ml-1">
-                      {periodosSel.size === detalhePeriodos.length ? "Desmarcar todos" : "Selecionar todos"}
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-4 flex-shrink-0 border-l border-gray-200 pl-4">
-                  <div className="text-right">
-                    <p className="text-[10px] text-gray-400 uppercase tracking-wide">Lançamentos</p>
-                    <p className="text-sm font-semibold text-gray-700 tabular-nums">
-                      {detalheGrupos.reduce((s, g) => s + g.lans.length, 0).toLocaleString("pt-BR")}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-[10px] text-gray-400 uppercase tracking-wide">Total</p>
-                    <p className={`text-sm font-bold tabular-nums${detalheTotal < 0 ? " text-red-600" : " text-gray-800"}`}>
-                      {fmtInt(detalheTotal)}
-                    </p>
-                  </div>
-                  <button onClick={exportarDetalhe}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 transition-colors whitespace-nowrap">
-                    <Download size={13} />
-                    Exportar Excel
-                  </button>
-                </div>
-              </div>
-
-              <div className="overflow-auto flex-1">
-                <table className="text-sm w-full border-collapse">
-                  <thead className="sticky top-0">
-                    <tr style={{ background: "#1e3a5f" }}>
-                      {["NUFIN","Data","Natureza","Centro de Resultado","Empresa","Projeto","Parceiro","Valor"].map((h, i) => (
-                        <th key={i}
-                          className={`px-3 py-2.5 text-white/80 text-xs uppercase tracking-wide font-semibold whitespace-nowrap${i === 7 ? " text-right" : " text-left"}`}>
-                          {h}
+            <div>
+              <table className="text-sm" style={{ minWidth: "max-content", width: "100%", borderCollapse: "separate", borderSpacing: 0 }}>
+                <thead>
+                  {viewMode === "trimestral" && (
+                    <tr style={{ background: "#152d4a" }}>
+                      <th className="sticky left-0 z-30 min-w-[200px]" style={{ background: "#152d4a" }} />
+                      {colunas.map((c, ci) => (
+                        <th key={ci} colSpan={1}
+                          className="px-3 py-1 text-center text-[10px] text-white/50 uppercase tracking-widest font-semibold border-l border-white/10">
+                          {c.label}
                         </th>
                       ))}
+                      <th className="border-l border-white/10 sticky right-0 z-30" style={{ background: "#152d4a" }} />
                     </tr>
-                  </thead>
-                  <tbody>
-                    {detalheGrupos.length === 0 && (
-                      <tr>
-                        <td colSpan={8} className="px-4 py-10 text-center text-gray-400 text-sm">
-                          Nenhum lançamento para os períodos selecionados.
+                  )}
+                  <tr style={{ background: "#1e3a5f" }}>
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-4 py-2.5 text-left sticky left-0 z-30 min-w-[200px]"
+                      style={{ background: "#1e3a5f" }}>
+                      Descrição
+                    </th>
+                    {colunas.map((c, ci) => {
+                      const sep = viewMode === "trimestral" && ci > 0;
+                      return (
+                        <th key={ci}
+                          className={`font-semibold text-white/80 text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap min-w-[130px]${sep ? " border-l border-white/10" : ""}`}
+                          style={{ background: "#1e3a5f" }}>
+                          <div className="uppercase">{c.label}</div>
+                          {c.sublabel && <div className="font-normal text-[10px] text-white/40 mt-0.5">{c.sublabel}</div>}
+                        </th>
+                      );
+                    })}
+                    <th className="font-semibold text-white/80 uppercase text-xs tracking-wide px-3 py-2.5 text-right whitespace-nowrap min-w-[140px] border-l border-white/20 sticky right-0 z-30"
+                      style={{ background: "#1e3a5f" }}>
+                      Total
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody suppressHydrationWarning>
+                  {mounted && visibleData.map(({ item }) => {
+                    const s          = getRowStyle(item.tipo, item.nivel);
+                    const isSubtotal = item.tipo === "SUBTOTAL";
+                    const isCollapsed = isSubtotal && collapsed.has(item.id);
+                    const total      = valoresTotal.valores.get(item.id) ?? 0;
+
+                    return (
+                      <tr key={item.id}
+                        style={{ background: s.bg, color: s.color, fontWeight: s.fw }}
+                        className="border-b border-gray-100">
+
+                        <td className="px-4 py-2.5 sticky left-0 z-10" style={{ background: s.bg }}>
+                          <span className="flex items-center gap-1" style={{ paddingLeft: `${(item.nivel - 1) * 16}px` }}>
+                            {isSubtotal ? (
+                              <button onClick={() => toggleCollapse(item.id)}
+                                className="flex-shrink-0 rounded p-0.5 transition-colors"
+                                style={{ color: s.dark ? "rgba(255,255,255,0.7)" : "#1e3a5f" }}>
+                                {isCollapsed ? <ChevronRt size={13} /> : <ChevronDown size={13} />}
+                              </button>
+                            ) : <span className="w-4 flex-shrink-0" />}
+                            <span className={`whitespace-nowrap${isSubtotal ? " uppercase" : ""}`}>{item.descricao}</span>
+                          </span>
+                        </td>
+
+                        {colunas.map((c, ci) => {
+                          const v = c.result.valores.get(item.id) ?? 0;
+                          const sep = viewMode === "trimestral" && ci > 0;
+                          return (
+                            <td key={ci}
+                              className={`px-3 py-2.5 text-right tabular-nums whitespace-nowrap${sep ? " border-l border-gray-100" : ""}`}>
+                              {v !== 0
+                                ? <span>{fmtInt(v)}</span>
+                                : <span style={{ opacity: 0.18 }}>—</span>}
+                            </td>
+                          );
+                        })}
+
+                        <td className="px-3 py-2.5 text-right tabular-nums whitespace-nowrap border-l border-gray-100 sticky right-0 z-10"
+                          style={{ fontWeight: isSubtotal ? "700" : "500", background: s.bg }}>
+                          {total !== 0
+                            ? <span>{fmtInt(total)}</span>
+                            : <span style={{ opacity: 0.18 }}>—</span>}
                         </td>
                       </tr>
-                    )}
-                    {detalheGrupos.map(g => (
-                      <React.Fragment key={g.periodo}>
-                        {g.lans.map((l, i) => (
-                          <tr key={`${g.periodo}-${i}`} className="border-b border-gray-100 hover:bg-gray-50">
-                            <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{l.nufin ?? "—"}</td>
-                            <td className="px-3 py-1.5 text-gray-500 tabular-nums whitespace-nowrap">{fmtDate(l.data)}</td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.codnat}</span>
-                              {natMap.get(l.codnat) ?? ""}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.codcencus}</span>
-                              {crMap.get(l.codcencus) ?? ""}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              <span className="text-gray-400 text-xs mr-1">{l.codemp}</span>
-                              {empMap.get(l.codemp) ?? ""}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              {l.codproj
-                                ? <><span className="text-gray-400 text-xs mr-1">{l.codproj}</span>{projMap.get(l.codproj) ?? ""}</>
-                                : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-700 whitespace-nowrap">
-                              {l.codparc
-                                ? <><span className="text-gray-400 text-xs mr-1">{l.codparc}</span>{parcMap.get(l.codparc) ?? ""}</>
-                                : <span className="text-gray-300">—</span>}
-                            </td>
-                            <td className={`px-3 py-1.5 text-right tabular-nums whitespace-nowrap font-medium${l.valor < 0 ? " text-red-600" : " text-gray-800"}`}>
-                              {fmtInt(l.valor)}
-                            </td>
-                          </tr>
-                        ))}
-                      </React.Fragment>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    );
+                  })}
 
+                  {mounted && visibleData.length === 0 && (
+                    <tr>
+                      <td colSpan={2 + colunas.length} className="px-4 py-12 text-center text-gray-400 text-sm">
+                        Nenhuma linha com valor.{" "}
+                        <button
+                          onClick={() => { setFiltros(f => ({ ...f, mostrarZeros: true })); setRascunho(r => ({ ...r, mostrarZeros: true })); }}
+                          className="text-blue-500 hover:underline">
+                          Mostrar linhas zeradas
+                        </button>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
-        </>
-      )}
+      </div>
+
+      {/* ── Debug ────────────────────────────────────────────────────────────── */}
+      <div className="px-6 pb-4">
+        <button onClick={() => setDebugOpen(v => !v)}
+          className="text-xs text-gray-400 hover:text-gray-600 border border-dashed border-gray-200 rounded px-2 py-1">
+          {debugOpen ? "▲ Fechar diagnóstico" : "▼ Diagnóstico de dados"}
+        </button>
+        {debugOpen && (
+          <div className="mt-2 bg-gray-50 border border-gray-200 rounded-lg p-4 text-xs font-mono space-y-3">
+            <p className="font-bold text-gray-700">DRE Gerencial · Orçado — Diagnóstico (ano {anoAtivo})</p>
+
+            {/* Tabs */}
+            <div className="flex gap-2 border-b border-gray-200 pb-1">
+              {(["geral", "cr"] as const).map(t => (
+                <button key={t} onClick={() => setDebugTab(t)}
+                  className={`px-3 py-1 rounded-t text-xs font-semibold transition-colors ${debugTab === t ? "bg-white border border-b-white border-gray-200 text-blue-700" : "text-gray-400 hover:text-gray-600"}`}>
+                  {t === "geral" ? "Mapeamento DRE" : `Filtro CR${crFiltroSet ? ` (${crFiltroSet.size} CRs)` : " (inativo)"}`}
+                </button>
+              ))}
+            </div>
+
+            {debugTab === "geral" && (
+              <>
+                <p className="text-gray-600">orcMap: <span className="text-blue-600">{debugInfo.orcMapTotal} item(s) com dado</span> | DRE CONTAs: {debugInfo.dreContaTotal}</p>
+
+                {debugInfo.contasComDado.length > 0 && (
+                  <div>
+                    <p className="font-semibold text-green-700 mb-1">✅ CONTAs COM dado ({debugInfo.contasComDado.length}):</p>
+                    {debugInfo.contasComDado.map(i => {
+                      const areas    = debugInfo.porItem.get(i.id) ?? [];
+                      const pai      = debugInfo.paiDeConta(i);
+                      const periodos = debugInfo.periodosDeConta(i.id);
+                      return (
+                        <div key={i.id} className="pl-2 mb-2 border-l-2 border-green-200">
+                          <p className="text-green-800 font-medium">• {i.descricao} <span className="text-gray-400 font-normal">[nível {i.nivel}]</span></p>
+                          <p className="pl-2 text-gray-500">↑ pai: {pai ? `"${pai.descricao}"` : "⚠️ sem pai"}</p>
+                          <p className="pl-2 text-gray-500">períodos: {periodos || "—"}</p>
+                          {areas.map((e, idx) => (
+                            <p key={idx} className="pl-2 text-blue-700">↳ {e.area} / {e.linhaDesc} — {e.totalAno.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</p>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {debugInfo.contasSemDado.length > 0 && (
+                  <div>
+                    <p className="font-semibold text-orange-700 mb-1">⚠️ CONTAs SEM dado ({debugInfo.contasSemDado.length}):</p>
+                    {debugInfo.contasSemDado.map(i => (
+                      <p key={i.id} className="text-orange-800 pl-2">• {i.descricao} <span className="text-gray-400">[{i.id}]</span></p>
+                    ))}
+                  </div>
+                )}
+
+                {debugInfo.orfaosDetalhados.length > 0 && (
+                  <div>
+                    <p className="font-semibold text-red-700 mb-1">❌ IDs inválidos na DRE ({debugInfo.orfaosDetalhados.length}) — dados perdidos:</p>
+                    {debugInfo.orfaosDetalhados.map(({ id, areas, total }) => (
+                      <div key={id} className="pl-2 mb-1">
+                        <p className="text-red-800">• ID inexistente: {id} — total: {total.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</p>
+                        {areas.map((e, idx) => (
+                          <p key={idx} className="pl-4 text-red-600">↳ {e.area} / {e.linhaDesc}</p>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {debugTab === "cr" && (
+              <>
+                {!crFiltroSet ? (
+                  <p className="text-gray-500">Nenhum filtro de CR ativo. Ative o filtro para ver o diagnóstico.</p>
+                ) : (
+                  <>
+                    <p className="text-gray-600">
+                      CRs no filtro: <span className="text-blue-600">[{[...crFiltroSet].join(", ")}]</span>
+                    </p>
+                    <p className="text-gray-600">
+                      Linhas analisadas: {debugInfo.crDiag.length} |{" "}
+                      <span className="text-green-700">passou: {debugInfo.crDiag.filter(e => e.passou).length}</span> |{" "}
+                      <span className="text-red-700">excluído: {debugInfo.crDiag.filter(e => !e.passou).length}</span>
+                    </p>
+
+                    {/* Excluídas com valor */}
+                    {(() => {
+                      const excluidas = debugInfo.crDiag.filter(e => !e.passou && e.totalAno !== 0);
+                      return excluidas.length > 0 && (
+                        <div>
+                          <p className="font-semibold text-red-700 mb-1">❌ Excluídas COM valor ({excluidas.length}):</p>
+                          {excluidas.map((e, idx) => (
+                            <div key={idx} className="pl-2 mb-1 border-l-2 border-red-200">
+                              <p className="text-red-800">• [{e.area}] {e.linhaDesc}</p>
+                              <p className="pl-2 text-gray-500">tipo: {e.tipo} · cat: {e.categoria} · {e.motivo}</p>
+                              <p className="pl-2 text-gray-400">total: {e.totalAno.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</p>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Incluídas com valor */}
+                    {(() => {
+                      const incluidas = debugInfo.crDiag.filter(e => e.passou && e.totalAno !== 0);
+                      return incluidas.length > 0 && (
+                        <div>
+                          <p className="font-semibold text-green-700 mb-1">✅ Incluídas COM valor ({incluidas.length}):</p>
+                          {incluidas.map((e, idx) => (
+                            <div key={idx} className="pl-2 mb-1 border-l-2 border-green-200">
+                              <p className="text-green-800">• [{e.area}] {e.linhaDesc}</p>
+                              <p className="pl-2 text-gray-500">tipo: {e.tipo} · cat: {e.categoria} · {e.motivo}</p>
+                              <p className="pl-2 text-gray-400">total: {e.totalAno.toLocaleString("pt-BR", { maximumFractionDigits: 0 })}</p>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Excluídas sem valor (zeradas) — colapsadas */}
+                    {(() => {
+                      const excZero = debugInfo.crDiag.filter(e => !e.passou && e.totalAno === 0);
+                      return excZero.length > 0 && (
+                        <p className="text-gray-400">+ {excZero.length} linha(s) excluída(s) sem valor (zeradas)</p>
+                      );
+                    })()}
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ── FilterDrawer ──────────────────────────────────────────────────────── */}
       {filterOpen && (
         <>
           <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setFilterOpen(false)} />
           <div className="fixed top-0 right-0 h-full w-[300px] z-50 bg-white shadow-xl flex flex-col">
-
             <div className="flex items-center justify-between px-4 py-4 border-b border-gray-200 flex-shrink-0">
               <span className="font-semibold text-gray-800">Filtros</span>
               <button onClick={() => setFilterOpen(false)}
@@ -768,72 +761,81 @@ export default function DreOrcadaPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto">
-
               <div className="border-b border-gray-100 px-4 py-4">
-                <p className="text-sm font-semibold text-gray-700 mb-3 flex items-center justify-between">
-                  Período
-                  {(rascunho.periodoInicio || rascunho.periodoFim) && (
-                    <span onClick={() => setRascunho(r => ({ ...r, periodoInicio: "", periodoFim: "" }))}
-                      className="text-[11px] text-blue-600 hover:underline cursor-pointer font-normal">limpar</span>
-                  )}
-                </p>
+                <p className="text-sm font-semibold text-gray-700 mb-3">Período</p>
                 <div className="space-y-2">
                   <div>
                     <label className="text-xs text-gray-500 mb-1 block">De</label>
                     <input type="month" value={rascunho.periodoInicio}
-                      onChange={e => {
-                        const v = e.target.value;
-                        setRascunho(r => ({ ...r, periodoInicio: v, periodoFim: r.periodoFim && r.periodoFim < v ? v : r.periodoFim }));
-                      }}
+                      onChange={e => { const v = e.target.value; setRascunho(r => ({ ...r, periodoInicio: v, periodoFim: r.periodoFim && r.periodoFim < v ? v : r.periodoFim })); }}
                       className="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white" />
                   </div>
                   <div>
                     <label className="text-xs text-gray-500 mb-1 block">Até</label>
                     <input type="month" value={rascunho.periodoFim}
-                      onChange={e => {
-                        const v = e.target.value;
-                        setRascunho(r => ({ ...r, periodoFim: v, periodoInicio: r.periodoInicio && r.periodoInicio > v ? v : r.periodoInicio }));
-                      }}
+                      onChange={e => { const v = e.target.value; setRascunho(r => ({ ...r, periodoFim: v, periodoInicio: r.periodoInicio && r.periodoInicio > v ? v : r.periodoInicio })); }}
                       className="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white" />
                   </div>
                 </div>
               </div>
 
               <div className="border-b border-gray-100 px-4 py-4">
-                <p className="text-sm font-semibold text-gray-700 mb-3 flex items-center justify-between">
-                  Visão
-                  {rascunho.viewMode !== "mensal" && (
-                    <span onClick={() => setRascunho(r => ({ ...r, viewMode: "mensal" }))}
-                      className="text-[11px] text-blue-600 hover:underline cursor-pointer font-normal">limpar</span>
-                  )}
-                </p>
+                <p className="text-sm font-semibold text-gray-700 mb-3">Visão</p>
                 <div className="space-y-0.5">
                   {(Object.keys(VIEW_LABELS) as ViewMode[]).map(mode => (
-                    <label key={mode}
-                      className="flex items-center gap-2 py-1.5 px-1 cursor-pointer hover:bg-gray-50 rounded text-sm text-gray-700">
-                      <input type="radio"
-                        checked={rascunho.viewMode === mode}
+                    <label key={mode} className="flex items-center gap-2 py-1.5 px-1 cursor-pointer hover:bg-gray-50 rounded text-sm text-gray-700">
+                      <input type="radio" checked={rascunho.viewMode === mode}
                         onChange={() => setRascunho(r => ({ ...r, viewMode: mode }))}
-                        className="w-4 h-4 cursor-pointer flex-shrink-0"
-                        style={{ accentColor: "#1e3a5f" }} />
+                        className="w-4 h-4 cursor-pointer flex-shrink-0" style={{ accentColor: "#1e3a5f" }} />
                       {VIEW_LABELS[mode]}
                     </label>
                   ))}
                 </div>
               </div>
 
+              {/* Centro de Resultado */}
+              {crOpcoes.length > 0 && (
+                <div className="border-b border-gray-100 px-4 py-4">
+                  <p className="text-sm font-semibold text-gray-700 mb-3 flex items-center justify-between">
+                    Centro de Resultado
+                    {(rascunho.crIds?.length ?? 0) > 0 && (
+                      <span onClick={() => setRascunho(r => ({ ...r, crIds: [] }))}
+                        className="text-[11px] text-blue-600 hover:underline cursor-pointer font-normal">limpar</span>
+                    )}
+                  </p>
+                  <div className="space-y-0.5">
+                    {crOpcoes.map(cr => (
+                      <label key={cr.CODCENCUS}
+                        className="flex items-center gap-2 py-1.5 px-1 cursor-pointer hover:bg-gray-50 rounded text-sm text-gray-700">
+                        <input type="checkbox"
+                          checked={rascunho.crIds?.includes(cr.CODCENCUS)}
+                          onChange={e => setRascunho(r => ({
+                            ...r,
+                            crIds: e.target.checked
+                              ? [...(r.crIds ?? []), cr.CODCENCUS]
+                              : (r.crIds ?? []).filter(id => id !== cr.CODCENCUS),
+                          }))}
+                          className="w-4 h-4 rounded cursor-pointer flex-shrink-0"
+                          style={{ accentColor: "#1e3a5f" }} />
+                        <span className="truncate" title={cr.DESCRCENCUS}>
+                          <span className="text-gray-400 text-xs mr-1">{cr.CODCENCUS}</span>
+                          {cr.DESCRCENCUS}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="px-4 py-4">
                 <p className="text-sm font-semibold text-gray-700 mb-3">Exibição</p>
                 <label className="flex items-center gap-2 py-1.5 px-1 cursor-pointer hover:bg-gray-50 rounded text-sm text-gray-700">
-                  <input type="checkbox"
-                    checked={rascunho.mostrarZeros}
+                  <input type="checkbox" checked={rascunho.mostrarZeros}
                     onChange={e => setRascunho(r => ({ ...r, mostrarZeros: e.target.checked }))}
-                    className="w-4 h-4 rounded cursor-pointer flex-shrink-0"
-                    style={{ accentColor: "#1e3a5f" }} />
+                    className="w-4 h-4 rounded cursor-pointer flex-shrink-0" style={{ accentColor: "#1e3a5f" }} />
                   Mostrar linhas zeradas
                 </label>
               </div>
-
             </div>
 
             <div className="flex gap-3 px-4 py-4 border-t border-gray-200 flex-shrink-0">
@@ -853,3 +855,4 @@ export default function DreOrcadaPage() {
     </div>
   );
 }
+

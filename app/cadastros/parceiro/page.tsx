@@ -90,15 +90,24 @@ export default function ParceiroPage() {
     }
     try {
       markStorageInitialized();
+      console.log("[parceiro] iniciando sankhyaQuery...");
       const { rows } = await sankhyaQuery(cfg, sess.bearerToken, QUERIES.PARCEIRO);
-      const synced: ParceiroRow[] = rows.map((r, i) => ({
-        id: `sync_parc_${i}`,
+      console.log("[parceiro] sankhyaQuery retornou:", rows.length, "registros");
+      const synced: ParceiroRow[] = rows.map((r) => ({
+        id: `parc_${r.CODPARC ?? ""}`,
         CODPARC: String(r.CODPARC ?? ""),
         NOMEPARC: String(r.NOMEPARC ?? ""),
         TIPO_REGISTRO: "NATIVO" as TipoRegistro,
       }));
-      setData((prev) => [...synced, ...prev.filter((r) => r.TIPO_REGISTRO === "GERENCIAL")]);
+      console.log("[parceiro] salvando", synced.length, "registros no storage...");
+      setData((prev) => {
+        const gerencial = prev.filter((r) => r.TIPO_REGISTRO === "GERENCIAL");
+        const next = [...synced, ...gerencial];
+        console.log("[parceiro] setData → total:", next.length, "(NATIVO:", synced.length, "GERENCIAL:", gerencial.length, ")");
+        return next;
+      });
     } catch (err) {
+      console.error("[parceiro] erro no sync:", err);
       alert(`Erro: ${err instanceof Error ? err.message : err}\n\nConfigure a integração em Configurações.`);
     }
     setSyncing(false);
@@ -148,7 +157,7 @@ export default function ParceiroPage() {
   }
 
   return (
-    <div>
+    <div className="h-full flex flex-col">
       <PageHeader title="Parceiro" subtitle={`Tabela TGFPAR · ${data.length} parceiros`}>
         <button
           className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
@@ -167,8 +176,8 @@ export default function ParceiroPage() {
         </button>
       </PageHeader>
 
-      <div className="p-6">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div className="p-6 flex-1 overflow-hidden flex flex-col">
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col flex-1 min-h-0">
           <div className="flex items-center gap-2 p-4 border-b border-gray-100">
             <div className="relative">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
@@ -191,7 +200,7 @@ export default function ParceiroPage() {
             <span className="text-xs text-gray-400 ml-auto">{filtered.length} de {data.length} registros</span>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: "#f8fafc" }}>
